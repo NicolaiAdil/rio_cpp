@@ -1,0 +1,3 @@
+[submodule "external/rio-lib"]
+	path = external/rio-lib
+	url = git@github.com:NicolaiAdil/rio-lib.git

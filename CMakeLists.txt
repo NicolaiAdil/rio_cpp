@@ -1,0 +1,32 @@
+cmake_minimum_required(VERSION 3.8)
+project(rio_cpp)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
+
+# rio-lib submodule
+set(RIO_LIB_DIR "${CMAKE_CURRENT_LIST_DIR}/external/rio-lib")
+add_subdirectory(${RIO_LIB_DIR} ${CMAKE_BINARY_DIR}/rio-lib-build)
+
+add_executable(rio_node src/rio_node.cpp)
+
+# This adds include dirs + required link interfaces for ROS packages (std_msgs headers included)
+ament_target_dependencies(rio_node rclcpp std_msgs)
+
+# IMPORTANT: use plain signature to avoid mismatch with ament internals
+target_link_libraries(rio_node rio::rio_eskf_cpp)
+
+# Ensure rio headers visible
+target_include_directories(rio_node PRIVATE ${RIO_LIB_DIR}/include)
+
+install(TARGETS rio_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()

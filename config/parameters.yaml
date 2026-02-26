@@ -3,10 +3,10 @@
     parameters:
       # Process noise, https://www.vectornav.com/products/detail/vn-100. 
       Q: [
-        0.00138866556, 0.00138866556, 0.00138866556,   # [ m / s^2 / sqrt(Hz)  ] accel white 
-        0.00008538212, 0.00008538212, 0.00008538212,   # [ m / s^3 / sqrt(Hz)  ] accel bias RW 
-        0.00005438054, 0.00005438054, 0.00005438054,   # [ rad / s / sqrt(Hz)  ] gyro white 
-        0.00000165879, 0.00000165879, 0.00000165879    # [ rad / s^2 / sqrt(Hz)] gyro bias RW
+        1.9283920393e-06, 1.9283920393e-06, 1.9283920393e-06,   # [ (m / s^2 / sqrt(Hz))^2] accel white 
+        7.2901076509e-09, 7.2901076509e-09, 7.2901076509e-09,   # [ (m / s^3 / sqrt(Hz))^2] accel bias RW 
+        2.9572436856e-09, 2.9572436856e-09, 2.9572436856e-09,   # [ (rad / s / sqrt(Hz))^2] gyro white 
+        2.7515926086e-12, 2.7515926086e-12, 2.7515926086e-12    # [ (rad / s^2 / sqrt(Hz))^2 ] gyro bias RW
       ]
       # Q: [
       #   1.9283920393e-03, 1.9283920393e-03, 1.9283920393e-03,   # accel white

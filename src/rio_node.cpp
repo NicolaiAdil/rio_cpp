@@ -81,6 +81,7 @@ public:
       "  gating_enable=%s  gate_nsigma=%.1f\n"
       "  p_IR=[%.4f, %.4f, %.4f]\n"
       "  q_IR=[%.4f, %.4f, %.4f, %.4f]\n"
+      "  vr_sign=%d\n"
       "----------------------------------------------------------",
       imu_topic_.c_str(), radar_topic_.c_str(), state_topic_.c_str(),
       static_cast<double>(params_rio_.tau_ba),
@@ -93,7 +94,8 @@ public:
       static_cast<double>(params_rio_.q_IR.x()),
       static_cast<double>(params_rio_.q_IR.y()),
       static_cast<double>(params_rio_.q_IR.z()),
-      static_cast<double>(params_rio_.q_IR.w()));
+      static_cast<double>(params_rio_.q_IR.w()),
+      static_cast<int>(params_rio_.vr_sign));
   }
 
 private:
@@ -120,7 +122,7 @@ private:
     // Extrinsics: p_IR (IMU->radar in IMU frame), q_IR (rotation IMU->radar) [x y z w]
     this->declare_parameter<std::vector<double>>("parameters.p_IR", {0.0, 0.0, 0.0});
     this->declare_parameter<std::vector<double>>("parameters.q_IR", {0.0, 0.0, 0.0, 1.0}); // [x y z w]
-    this->declare_parameter<int>("radar_vr_sign", -1);
+    this->declare_parameter<int>("radar_vr_sign", 1);
 
     // Topics
     this->declare_parameter<std::string>("parameters.state_estimate_topic", "/rio/pose");
@@ -333,12 +335,15 @@ private:
     eskf_.insPropagation(s, dt);
 
     if (!radar_buf_.empty()) {
-      // RCLCPP_INFO(get_logger(), "Correcting with %zu radar measurements at t=%.3f", radar_buf_.size(), t);
-      // eskf_.correct(radar_buf_.data(), radar_buf_.size(), w_nom);
+      const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), w_nom);
+      if (res.n_rejected > 0 || res.n_skipped > 0) {
+        RCLCPP_INFO(get_logger(),
+          "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu",
+          res.n_total, res.n_accepted, res.n_rejected, res.n_skipped);
+      }
       radar_buf_.clear();
     } else {
-      // eskf_.advancePriorToPosteriror();
-      // RCLCPP_INFO(get_logger(), "No radar measurements to correct with at t=%.3f", t);
+      eskf_.advancePriorToPosteriror();
     }
 
     publishState_(msg->header.stamp);

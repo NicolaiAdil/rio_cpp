@@ -43,9 +43,9 @@
       # heading_topic: '/heading'
       radar_topic: '/radar/cloud'
 
-      radar_vr_sign: 1        # flip to -1 if your driver uses opposite Doppler sign
+    radar_vr_sign: 1        # flip to -1 if your driver uses opposite Doppler sign
 
-      initial_sigma:
+    initial_sigma:
         attitude_deg:       [6.0, 6.0, 1.0e-6]
         position:           [1.0e-6, 1.0e-6, 1.0e-6]
         velocity:           [1.0e-1, 1.0e-1, 1.0e-1]

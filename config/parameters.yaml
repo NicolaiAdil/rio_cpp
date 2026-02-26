@@ -1,0 +1,57 @@
+/**:
+  ros__parameters:
+    parameters:
+      # Process noise, https://www.vectornav.com/products/detail/vn-100. 
+      Q: [
+        0.00138866556, 0.00138866556, 0.00138866556,   # [ m / s^2 / sqrt(Hz)  ] accel white 
+        0.00008538212, 0.00008538212, 0.00008538212,   # [ m / s^3 / sqrt(Hz)  ] accel bias RW 
+        0.00005438054, 0.00005438054, 0.00005438054,   # [ rad / s / sqrt(Hz)  ] gyro white 
+        0.00000165879, 0.00000165879, 0.00000165879    # [ rad / s^2 / sqrt(Hz)] gyro bias RW
+      ]
+      # Q: [
+      #   1.9283920393e-03, 1.9283920393e-03, 1.9283920393e-03,   # accel white
+      #   7.2901076509e-06, 7.2901076509e-06, 7.2901076509e-06,   # accel bias RW
+      #   2.9572436856e-06, 2.9572436856e-06, 2.9572436856e-06,   # gyro white
+      #   2.7515926086e-9, 2.7515926086e-9, 2.7515926086e-9    # gyro bias RW
+      # ]
+      radar_sigma_vr: 0.038    # per-return Doppler noise (m/s)
+
+      # Time constants for the bias models, chosen based on the matlab example
+      T_acc: 700.0 # Eq. 14.195 in Fossen 2nd edition
+      T_ars: 450.0 # 14.196 in Fossen 2nd edition
+
+      # Gating
+      radar_gating_enable: true
+      radar_gate_nsigma: 4.0
+
+      # BAD Radar -> IMU extrinsic transformation
+      # l_BR_B: [0.06872, 0.01159, -0.06919] # [x y z]
+      # q_R_B: [0.9723699204, 0.0, -0.2334453639, 0.0] # [x y z w]
+
+      # Radar -> IMU extrinsic transformation
+      p_IR: [0.07872, 0.02159, -0.05919] # [x y z]
+      q_IR: [0.9723699204, 0.0, -0.2334453639, 0.0] # [x y z w]
+
+      # GT radar extrinsics
+      # l_BR_B: [0.077, 0.016, -0.063] # xyz
+      # q_R_B: [0.963, -0.021, -0.265, 0.021] # xyzw
+
+      # ROS2 PARAMETERS
+      state_estimate_topic: '/rio/pose' # Publisher
+      imu_topic: '/vectornav_driver_node/imu/data'
+      # fix_topic: '/fix'
+      # heading_topic: '/heading'
+      radar_topic: '/radar/cloud'
+
+      radar_vr_sign: 1        # flip to -1 if your driver uses opposite Doppler sign
+
+      initial_sigma:
+        attitude_deg:       [6.0, 6.0, 1.0e-6]
+        position:           [1.0e-6, 1.0e-6, 1.0e-6]
+        velocity:           [1.0e-1, 1.0e-1, 1.0e-1]
+        accel_bias:         [1.0e-2, 1.0e-2, 1.0e-2]
+        gyro_bias:          [1.0e-4, 1.0e-4, 1.0e-4]
+        radar_position:     [2.0e-3, 2.0e-3, 2.0e-3]
+        radar_attitude_deg: [0.5, 0.5, 0.5]
+
+  

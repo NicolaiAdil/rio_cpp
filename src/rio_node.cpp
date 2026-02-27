@@ -273,8 +273,6 @@ private:
       return;
     }
 
-
-
     // Angular velocity
     const rio::Vec3 w_b = rio::Vec3(
       static_cast<float>(msg->angular_velocity.x),
@@ -288,41 +286,17 @@ private:
 
     // Initialize attitude from gravity
     if (!initialized_att_) {
-      // const rio::Vec3 f_b = last_f_b_;
-
-      const float fn = f_b.norm();
-      if (fn < 9.0f || fn > 10.5f) {
+      if (!eskf_.initAttitudeFromGravity(f_b, P0_diag_.data(), static_cast<float>(t))) {
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
-          "Waiting for level/stationary IMU for attitude init (|acc|=%.3f)", fn);
+          "Waiting for level/stationary IMU for attitude init (|acc|=%.3f)", f_b.norm());
         return;
       }
-      RCLCPP_INFO(get_logger(), "Initializing attitude from gravity (|acc|=%.3f)", fn);
-
-      const rio::Vec3 gb = f_b / std::max(1e-6f, fn);
-      const float roll  = std::atan2(gb.y(), gb.z());
-      const float pitch = std::atan2(-gb.x(), std::sqrt(gb.y()*gb.y() + gb.z()*gb.z()));
-      const float yaw   = 0.0f; // arbitrary without compass
-
-      tf2::Quaternion q;
-      q.setRPY(roll, pitch, yaw);
-
-      rio::NominalState x0 = eskf_.getState();
-      x0.q_WI = rio::Quat(static_cast<float>(q.w()),
-                          static_cast<float>(q.x()),
-                          static_cast<float>(q.y()),
-                          static_cast<float>(q.z())).normalized();
-
-      eskf_.reset(x0, P0_diag_.data(), static_cast<float>(t));
-
       initialized_att_ = true;
-
-      RCLCPP_INFO(get_logger(), "Initialized attitude from gravity: roll=%.3f pitch=%.3f", roll, pitch);
+      RCLCPP_INFO(get_logger(), "Initialized attitude from gravity (|acc|=%.3f)", f_b.norm());
       return;
     }
 
     // Propagate
-    const auto& x_pre = eskf_.getState();
-    const rio::Vec3 w_nom = w_b - x_pre.b_g;
     const float dt = static_cast<float>(t - last_imu_time_);
     last_imu_time_ = t;
 
@@ -331,11 +305,11 @@ private:
     s.acc = f_b;
     s.gyr = w_b;
 
-    eskf_.predict(s, dt);
-    eskf_.insPropagation(s, dt);
+    eskf_.predict(s, dt); // Error state prop
+    eskf_.insPropagation(s, dt); // Update the nominal state
 
     if (!radar_buf_.empty()) {
-      const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), w_nom);
+      const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), s);
       if (res.n_rejected > 0 || res.n_skipped > 0) {
         RCLCPP_INFO(get_logger(),
           "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu",
@@ -343,7 +317,7 @@ private:
       }
       radar_buf_.clear();
     } else {
-      eskf_.advancePriorToPosteriror();
+      eskf_.advancePriorToPosterior();
     }
 
     publishState_(msg->header.stamp);

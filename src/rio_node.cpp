@@ -169,7 +169,7 @@ private:
     // Configure rio-lib Params
     rio::Params p;
 
-    p.g_W = rio::Vec3(0.0f, 0.0f, -9.81f);
+    p.g_W = rio::Vec3(0.0f, 0.0f, 9.81f);
 
     // Q diag (12) -> noise densities
     p.sigma_acc = static_cast<float>(std::sqrt(std::max(0.0, Qv[0])));
@@ -333,7 +333,7 @@ private:
     const double t = std::max(t_acc, t_gyr);
     // RCLCPP_INFO(get_logger(), "Processing IMU sample at t=%.3f (age diff=%.3f s)", t, age_diff);
 
-    const rio::Vec3 f_b(latest_accel_.x, latest_accel_.y, -latest_accel_.z);
+    const rio::Vec3 f_b(-latest_accel_.x, -latest_accel_.y, latest_accel_.z);
     const rio::Vec3 w_b(-latest_gyro_.x, -latest_gyro_.y, latest_gyro_.z);
 
     // Mark consumed so we don't re-process the same pair

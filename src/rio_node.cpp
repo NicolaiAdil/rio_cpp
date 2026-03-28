@@ -2,10 +2,13 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <mutex>
 
 #include "rclcpp/rclcpp.hpp"
 
-#include "sensor_msgs/msg/imu.hpp"
+#include "px4_msgs/msg/sensor_accel.hpp"
+#include "px4_msgs/msg/sensor_gyro.hpp"
+
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 
@@ -20,10 +23,6 @@
 #include <rio/rio_eskf.h>
 
 namespace {
-
-inline double stampToSec(const builtin_interfaces::msg::Time& t) {
-  return static_cast<double>(t.sec) + 1e-9 * static_cast<double>(t.nanosec);
-}
 
 inline rio::Quat quatFromXYWZ(float x, float y, float z, float w) {
   rio::Quat q(w, x, y, z);
@@ -63,6 +62,19 @@ static inline std::array<double, 3> getVec3ParamOrThrow(
 
 static inline double deg2rad(double d) { return d * M_PI / 180.0; }
 
+/// Convert PX4 microsecond timestamp to seconds (double)
+inline double px4UsToSec(uint64_t us) {
+  return static_cast<double>(us) * 1e-6;
+}
+
+/// Convert a double time (seconds) to a ROS stamp
+inline builtin_interfaces::msg::Time secToStamp(double t) {
+  builtin_interfaces::msg::Time stamp;
+  stamp.sec = static_cast<int32_t>(std::floor(t));
+  stamp.nanosec = static_cast<uint32_t>((t - std::floor(t)) * 1e9);
+  return stamp;
+}
+
 }  // namespace
 
 class RioNode final : public rclcpp::Node {
@@ -73,8 +85,9 @@ public:
     setupRosInterfaces_();
 
     RCLCPP_INFO(get_logger(),
-      "RIO C++ node configured:\n"
-      "  imu_topic=%s\n"
+      "RIO C++ node configured (PX4 accel+gyro mode):\n"
+      "  accel_topic=%s\n"
+      "  gyro_topic=%s\n"
       "  radar_topic=%s\n"
       "  state_topic=%s\n"
       "  T_acc=%.1f  T_ars=%.1f\n"
@@ -83,7 +96,8 @@ public:
       "  q_IR=[%.4f, %.4f, %.4f, %.4f]\n"
       "  vr_sign=%d\n"
       "----------------------------------------------------------",
-      imu_topic_.c_str(), radar_topic_.c_str(), state_topic_.c_str(),
+      accel_topic_.c_str(), gyro_topic_.c_str(),
+      radar_topic_.c_str(), state_topic_.c_str(),
       static_cast<double>(params_rio_.tau_ba),
       static_cast<double>(params_rio_.tau_bg),
       params_rio_.gating_enable ? "true" : "false",
@@ -124,21 +138,27 @@ private:
     this->declare_parameter<std::vector<double>>("parameters.q_IR", {0.0, 0.0, 0.0, 1.0}); // [x y z w]
     this->declare_parameter<int>("radar_vr_sign", 1);
 
-    // Topics
+    // Topics — now separate accel and gyro instead of a single IMU topic
     this->declare_parameter<std::string>("parameters.state_estimate_topic", "/rio/pose");
-    this->declare_parameter<std::string>("parameters.imu_topic", "/imu/data");
+    this->declare_parameter<std::string>("parameters.accel_topic", "/fmu/out/sensor_accel");
+    this->declare_parameter<std::string>("parameters.gyro_topic", "/fmu/out/sensor_gyro");
     this->declare_parameter<std::string>("parameters.radar_topic", "/radar/cloud");
 
+    // Max age difference (seconds) between accel and gyro to consider them paired
+    this->declare_parameter<double>("parameters.max_accel_gyro_dt", 0.005);
+
     // Extra (C++ node specific; safe defaults)
-    this->declare_parameter<double>("parameters.max_dt", 0.05);   // matches rio-lib default
+    this->declare_parameter<double>("parameters.max_dt", 0.05);
     this->declare_parameter<double>("parameters.min_dt", 1e-4);
   }
 
   void loadParamsOrThrow_() {
     // Topics
     state_topic_ = this->get_parameter("parameters.state_estimate_topic").as_string();
-    imu_topic_   = this->get_parameter("parameters.imu_topic").as_string();
+    accel_topic_ = this->get_parameter("parameters.accel_topic").as_string();
+    gyro_topic_  = this->get_parameter("parameters.gyro_topic").as_string();
     radar_topic_ = this->get_parameter("parameters.radar_topic").as_string();
+    max_accel_gyro_dt_ = this->get_parameter("parameters.max_accel_gyro_dt").as_double();
 
     // Q (12)
     const auto Qv = this->get_parameter("parameters.Q").as_double_array();
@@ -152,8 +172,6 @@ private:
     p.g_W = rio::Vec3(0.0f, 0.0f, -9.81f);
 
     // Q diag (12) -> noise densities
-    // Order: accel white (0..2), accel bias RW (3..5),
-    //        gyro white (6..8), gyro bias RW (9..11)
     p.sigma_acc = static_cast<float>(std::sqrt(std::max(0.0, Qv[0])));
     p.sigma_ba  = static_cast<float>(std::sqrt(std::max(0.0, Qv[3])));
     p.sigma_gyr = static_cast<float>(std::sqrt(std::max(0.0, Qv[6])));
@@ -167,7 +185,7 @@ private:
     p.max_dt = static_cast<float>(this->get_parameter("parameters.max_dt").as_double());
     p.min_dt = static_cast<float>(this->get_parameter("parameters.min_dt").as_double());
 
-    // Radar measurement params (gating, sigma, sign all stored in Params)
+    // Radar measurement params
     p.sigma_vr      = static_cast<float>(this->get_parameter("parameters.radar_sigma_vr").as_double());
     p.gating_enable = this->get_parameter("parameters.radar_gating_enable").as_bool();
     p.gate_nsigma   = static_cast<float>(this->get_parameter("parameters.radar_gate_nsigma").as_double());
@@ -203,7 +221,6 @@ private:
     const auto sig_pir      = getVec3ParamOrThrow(this, "initial_sigma.radar_position");
     const auto sig_thir_deg = getVec3ParamOrThrow(this, "initial_sigma.radar_attitude_deg");
 
-    // Convert attitude sigmas from degrees -> radians
     const std::array<double, 3> sig_th = {
       deg2rad(sig_th_deg[0]), deg2rad(sig_th_deg[1]), deg2rad(sig_th_deg[2])
     };
@@ -221,13 +238,13 @@ private:
       }
     };
 
-    fill3(0,  sig_p);     // δp
-    fill3(3,  sig_v);     // δv
-    fill3(6,  sig_ba);    // δb_a
-    fill3(9,  sig_th);    // δθ
-    fill3(12, sig_bg);    // δb_g
-    fill3(15, sig_pir);   // δp_IR
-    fill3(18, sig_thir);  // δθ_IR
+    fill3(0,  sig_p);
+    fill3(3,  sig_v);
+    fill3(6,  sig_ba);
+    fill3(9,  sig_th);
+    fill3(12, sig_bg);
+    fill3(15, sig_pir);
+    fill3(18, sig_thir);
 
     rio::NominalState x0;
     x0.p_IR = params_rio_.p_IR;
@@ -246,43 +263,90 @@ private:
     gyro_bias_pub_  = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/gyro_bias", 10);
     radar_extr_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/radar/extrinsics", 10);
 
-    imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
-      imu_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&RioNode::onImu_, this, std::placeholders::_1));
+    // Subscribe to PX4 accel and gyro separately
+    accel_sub_ = this->create_subscription<px4_msgs::msg::SensorAccel>(
+      accel_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&RioNode::onAccel_, this, std::placeholders::_1));
+
+    gyro_sub_ = this->create_subscription<px4_msgs::msg::SensorGyro>(
+      gyro_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&RioNode::onGyro_, this, std::placeholders::_1));
 
     radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       radar_topic_, rclcpp::SensorDataQoS(),
       std::bind(&RioNode::onRadar_, this, std::placeholders::_1));
   }
 
-  // ---------------- Core callbacks ----------------
-  void onImu_(const sensor_msgs::msg::Imu::SharedPtr msg) {
-    // NaN guard similar to Python
-    if (!std::isfinite(msg->orientation.x) || !std::isfinite(msg->orientation.y) ||
-        !std::isfinite(msg->orientation.z) || !std::isfinite(msg->orientation.w) ||
-        !std::isfinite(msg->angular_velocity.z)) {
+  // ----------------------------------------------------------------
+  // PX4 accel callback — store latest, then try to run the filter
+  // ----------------------------------------------------------------
+  void onAccel_(const px4_msgs::msg::SensorAccel::SharedPtr msg) {
+    if (!std::isfinite(msg->x) || !std::isfinite(msg->y) || !std::isfinite(msg->z)) {
       return;
     }
 
-    const double t = stampToSec(msg->header.stamp);
+    latest_accel_.x = msg->x;
+    latest_accel_.y = msg->y;
+    latest_accel_.z = msg->z;
+    latest_accel_time_us_ = msg->timestamp_sample;
+    accel_valid_ = true;
 
-    // First timestamp only seeds time
+    tryProcessImu_();
+  }
+
+  // ----------------------------------------------------------------
+  // PX4 gyro callback — store latest, then try to run the filter
+  // ----------------------------------------------------------------
+  void onGyro_(const px4_msgs::msg::SensorGyro::SharedPtr msg) {
+    if (!std::isfinite(msg->x) || !std::isfinite(msg->y) || !std::isfinite(msg->z)) {
+      return;
+    }
+
+    latest_gyro_.x = msg->x;
+    latest_gyro_.y = msg->y;
+    latest_gyro_.z = msg->z;
+    latest_gyro_time_us_ = msg->timestamp_sample;
+    gyro_valid_ = true;
+
+    tryProcessImu_();
+  }
+
+  // ----------------------------------------------------------------
+  // Combine accel + gyro and run the ESKF predict step.
+  // Called from whichever callback arrives second.
+  // Uses the newer of the two timestamps as the IMU timestamp.
+  // ----------------------------------------------------------------
+  void tryProcessImu_() {
+    if (!accel_valid_ || !gyro_valid_) return;
+
+    // Check that accel and gyro are close in time
+    const double t_acc = px4UsToSec(latest_accel_time_us_);
+    const double t_gyr = px4UsToSec(latest_gyro_time_us_);
+    const double age_diff = std::abs(t_acc - t_gyr);
+
+    if (age_diff > max_accel_gyro_dt_) {
+      // Samples too far apart; wait for a fresher match
+      return;
+    }
+
+    // Use the newer timestamp as the combined IMU time
+    const double t = std::max(t_acc, t_gyr);
+    // RCLCPP_INFO(get_logger(), "Processing IMU sample at t=%.3f (age diff=%.3f s)", t, age_diff);
+
+    const rio::Vec3 f_b(latest_accel_.x, latest_accel_.y, latest_accel_.z);
+    const rio::Vec3 w_b(latest_gyro_.x, latest_gyro_.y, latest_gyro_.z);
+
+    // Mark consumed so we don't re-process the same pair
+    accel_valid_ = false;
+    gyro_valid_  = false;
+
+    // --- From here the logic mirrors the original onImu_ ---
+
     if (!initialized_time_) {
       last_imu_time_ = t;
       initialized_time_ = true;
       return;
     }
-
-    // Angular velocity
-    const rio::Vec3 w_b = rio::Vec3(
-      static_cast<float>(msg->angular_velocity.x),
-      static_cast<float>(msg->angular_velocity.y),
-      static_cast<float>(msg->angular_velocity.z));
-
-    const rio::Vec3 f_b = rio::Vec3(
-      static_cast<float>(msg->linear_acceleration.x),
-      static_cast<float>(msg->linear_acceleration.y),
-      static_cast<float>(msg->linear_acceleration.z));
 
     // Initialize attitude from gravity
     if (!initialized_att_) {
@@ -301,14 +365,15 @@ private:
     last_imu_time_ = t;
 
     rio::ImuSample s;
-    s.t = static_cast<float>(t);
+    s.t   = static_cast<float>(t);
     s.acc = f_b;
     s.gyr = w_b;
 
-    eskf_.predict(s, dt); // Error state prop
-    eskf_.insPropagation(s, dt); // Update the nominal state
+    eskf_.predict(s, dt);
+    eskf_.insPropagation(s, dt);
 
     if (!radar_buf_.empty()) {
+      // RCLCPP_INFO(get_logger(), "Running correction with %zu radar returns", radar_buf_.size());
       const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), s);
       if (res.n_rejected > 0 || res.n_skipped > 0) {
         RCLCPP_INFO(get_logger(),
@@ -320,26 +385,23 @@ private:
       eskf_.advancePriorToPosterior();
     }
 
-    publishState_(msg->header.stamp);
+    // Publish using a ROS stamp derived from the PX4 time
+    publishState_(secToStamp(t));
   }
 
   void onRadar_(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     if (msg->width * msg->height == 0) return;
 
-    // Require xyz
     if (!hasField(*msg, "x") || !hasField(*msg, "y") || !hasField(*msg, "z")) return;
 
-    // Doppler field name: try common options
     const std::string dop_field = findFirstExistingField(
       *msg, {"doppler", "vr", "v", "velocity", "radial_velocity"});
     if (dop_field.empty()) {
       RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
-        "Radar PointCloud2 missing Doppler field (expected doppler/vr/v/velocity/radial_velocity).");
+        "Radar PointCloud2 missing Doppler field.");
       return;
     }
 
-    // Iterators require correct type. This assumes float32 fields.
-    // If your Doppler field is float64 or int16, you must adjust.
     sensor_msgs::PointCloud2ConstIterator<float> it_x(*msg, "x");
     sensor_msgs::PointCloud2ConstIterator<float> it_y(*msg, "y");
     sensor_msgs::PointCloud2ConstIterator<float> it_z(*msg, "z");
@@ -399,8 +461,6 @@ private:
     odom.pose.pose.orientation.z = x.q_WI.z();
     odom.pose.pose.orientation.w = x.q_WI.w();
 
-    // Map covariance like Python: pose position from P(0:3,0:3), pose attitude from P(9:12,9:12)
-    // ROS expects 6x6 covariance packed row-major.
     for (double &c : odom.pose.covariance) c = 0.0;
     for (int r = 0; r < 3; ++r)
       for (int c = 0; c < 3; ++c)
@@ -436,13 +496,12 @@ private:
     bg.vector.z = x.b_g.z();
     gyro_bias_pub_->publish(bg);
 
-    // Radar extrinsics publisher (estimated from filter state)
+    // Radar extrinsics publisher
     geometry_msgs::msg::PoseStamped extr;
     extr.header = odom.header;
     extr.pose.position.x = x.p_IR.x();
     extr.pose.position.y = x.p_IR.y();
     extr.pose.position.z = x.p_IR.z();
-
     extr.pose.orientation.x = x.q_IR.x();
     extr.pose.orientation.y = x.q_IR.y();
     extr.pose.orientation.z = x.q_IR.z();
@@ -456,7 +515,8 @@ private:
   rio::Params params_rio_{};
 
   // ROS interfaces
-  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+  rclcpp::Subscription<px4_msgs::msg::SensorAccel>::SharedPtr accel_sub_;
+  rclcpp::Subscription<px4_msgs::msg::SensorGyro>::SharedPtr gyro_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr radar_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr accel_bias_pub_;
@@ -466,16 +526,24 @@ private:
 
   // Parameters
   std::string state_topic_;
-  std::string imu_topic_;
+  std::string accel_topic_;
+  std::string gyro_topic_;
   std::string radar_topic_;
+  double max_accel_gyro_dt_{0.005};
+
+  // Latest buffered accel/gyro samples for pairing
+  struct { float x{0}, y{0}, z{0}; } latest_accel_;
+  struct { float x{0}, y{0}, z{0}; } latest_gyro_;
+  uint64_t latest_accel_time_us_{0};
+  uint64_t latest_gyro_time_us_{0};
+  bool accel_valid_{false};
+  bool gyro_valid_{false};
 
   // State
   bool initialized_att_{false};
   bool initialized_time_{false};
   double last_imu_time_{0.0};
 
-  rio::Vec3 last_omega_b_{rio::Vec3::Zero()};
-  rio::Vec3 last_f_b_{rio::Vec3::Zero()};
   std::vector<rio::RadarDoppler> radar_buf_;
   std::array<float, 21> P0_diag_{};
 };

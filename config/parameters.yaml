@@ -2,19 +2,19 @@
   ros__parameters:
     parameters:
       # Process noise, https://www.vectornav.com/products/detail/vn-100. 
-      Q: [
-        1.9283920393e-06, 1.9283920393e-06, 1.9283920393e-06,   # [ (m / s^2 / sqrt(Hz))^2] accel white 
-        7.2901076509e-09, 7.2901076509e-09, 7.2901076509e-09,   # [ (m / s^3 / sqrt(Hz))^2] accel bias RW 
-        2.9572436856e-09, 2.9572436856e-09, 2.9572436856e-09,   # [ (rad / s / sqrt(Hz))^2] gyro white 
-        2.7515926086e-12, 2.7515926086e-12, 2.7515926086e-12    # [ (rad / s^2 / sqrt(Hz))^2 ] gyro bias RW
-      ]
       # Q: [
-      #   1.9283920393e-03, 1.9283920393e-03, 1.9283920393e-03,   # accel white
-      #   7.2901076509e-06, 7.2901076509e-06, 7.2901076509e-06,   # accel bias RW
-      #   2.9572436856e-06, 2.9572436856e-06, 2.9572436856e-06,   # gyro white
-      #   2.7515926086e-9, 2.7515926086e-9, 2.7515926086e-9    # gyro bias RW
+      #   1.9283920393e-06, 1.9283920393e-06, 1.9283920393e-06,   # [ (m / s^2 / sqrt(Hz))^2] accel white 
+      #   7.2901076509e-09, 7.2901076509e-09, 7.2901076509e-09,   # [ (m / s^3 / sqrt(Hz))^2] accel bias RW 
+      #   2.9572436856e-09, 2.9572436856e-09, 2.9572436856e-09,   # [ (rad / s / sqrt(Hz))^2] gyro white 
+      #   2.7515926086e-12, 2.7515926086e-12, 2.7515926086e-12    # [ (rad / s^2 / sqrt(Hz))^2 ] gyro bias RW
       # ]
-      radar_sigma_vr: 0.038    # per-return Doppler noise (m/s)
+      Q: [
+        9.62361e-7, 9.62361e-7, 9.62361e-7,   # [ (m / s^2 / sqrt(Hz))^2] accel white 
+        9.62361e-8, 9.62361e-8, 9.62361e-8,   # [ (m / s^3 / sqrt(Hz))^2] accel bias RW 
+        1.94955148e-8, 1.94955148e-8, 1.94955148e-8,   # [ (rad / s / sqrt(Hz))^2] gyro white 
+        1.94955148e-9, 1.94955148e-9, 1.94955148e-9    # [ (rad / s^2 / sqrt(Hz))^2 ] gyro bias RW
+      ]
+      radar_sigma_vr: 0.12    # per-return Doppler noise (m/s)
 
       # Time constants for the bias models, chosen based on the matlab example
       T_acc: 700.0 # Eq. 14.195 in Fossen 2nd edition
@@ -29,8 +29,8 @@
       # q_R_B: [0.9723699204, 0.0, -0.2334453639, 0.0] # [x y z w]
 
       # Radar -> IMU extrinsic transformation
-      p_IR: [0.07872, 0.02159, -0.05919] # [x y z]
-      q_IR: [0.9723699204, 0.0, -0.2334453639, 0.0] # [x y z w]
+      p_IR: [0.2, 0.0, 0.05] # [x y z]
+      q_IR: [0.0, 0.0, 0.0, 1.0] # [x y z w]
 
       # GT radar extrinsics
       # l_BR_B: [0.077, 0.016, -0.063] # xyz
@@ -38,10 +38,12 @@
 
       # ROS2 PARAMETERS
       state_estimate_topic: '/rio/pose' # Publisher
-      imu_topic: '/vectornav_driver_node/imu/data'
+      # imu_topic: '/vectornav_driver_node/imu/data'
+      gyro_topic: '/fmu/out/sensor_gyro'
+      accel_topic: '/fmu/out/sensor_accel'
       # fix_topic: '/fix'
       # heading_topic: '/heading'
-      radar_topic: '/radar/cloud'
+      radar_topic: '/sr75_node/points'
 
     radar_vr_sign: 1        # flip to -1 if your driver uses opposite Doppler sign
 

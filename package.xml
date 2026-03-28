@@ -10,6 +10,12 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>px4_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
 
   <!-- Eigen is required (rio-lib uses Eigen headers) -->
   <build_depend>eigen3_cmake_module</build_depend>

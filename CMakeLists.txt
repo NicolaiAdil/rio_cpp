@@ -9,7 +9,9 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(px4_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -20,7 +22,17 @@ add_subdirectory(${RIO_LIB_DIR} ${CMAKE_BINARY_DIR}/rio-lib-build)
 
 add_executable(rio_node src/rio_node.cpp)
 
-ament_target_dependencies(rio_node rclcpp std_msgs sensor_msgs nav_msgs tf2 tf2_ros Eigen3)
+ament_target_dependencies(rio_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  px4_msgs
+  nav_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  Eigen3
+)
 
 target_link_libraries(rio_node rio::rio_eskf_cpp)
 

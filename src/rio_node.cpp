@@ -3,6 +3,8 @@
 #include <vector>
 #include <array>
 #include <mutex>
+#include <thread>
+#include <chrono>
 
 #include "rclcpp/rclcpp.hpp"
 
@@ -19,6 +21,10 @@
 
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_ros/transform_broadcaster.h"
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
+
 
 #include <rio/rio_eskf.h>
 
@@ -113,7 +119,7 @@ public:
   }
 
 private:
-  // ---------------- Parameters (match Python names) ----------------
+  // ---------------- Parameters ----------------
   void declareParams_() {
     // EKF parameters
     this->declare_parameter<std::vector<double>>("parameters.Q", std::vector<double>(12, 0.0));
@@ -150,6 +156,11 @@ private:
     // Extra (C++ node specific; safe defaults)
     this->declare_parameter<double>("parameters.max_dt", 0.05);
     this->declare_parameter<double>("parameters.min_dt", 1e-4);
+
+    // TF frame names
+    this->declare_parameter<std::string>("parameters.raw_imu_frame", "raw_imu");
+    this->declare_parameter<std::string>("parameters.body_frame", "base_link");
+    this->declare_parameter<std::string>("parameters.gimbal_frame", "SR_75_base-frame");
   }
 
   void loadParamsOrThrow_() {
@@ -253,9 +264,42 @@ private:
 
     initialized_att_ = false;
     initialized_time_ = false;
+
+    raw_imu_frame_ = this->get_parameter("parameters.raw_imu_frame").as_string();
+    body_frame_    = this->get_parameter("parameters.body_frame").as_string();
+    gimbal_frame_  = this->get_parameter("parameters.gimbal_frame").as_string();
   }
 
   void setupRosInterfaces_() {
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock(), tf2::durationFromSec(10.0));
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    // Block until the static raw_imu->body transform is available.
+    // lookupTransform(target, source) returns the transform that maps vectors
+    // from source into target, so (body_frame_, raw_imu_frame_) gives R_body_imu.
+    RCLCPP_INFO(get_logger(), "Waiting for static %s->%s transform...",
+        raw_imu_frame_.c_str(), body_frame_.c_str());
+    while (rclcpp::ok()) {
+        try {
+            tf_buffer_->lookupTransform(body_frame_, raw_imu_frame_, tf2::TimePointZero);
+            break;
+        } catch (const tf2::TransformException& ex) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
+                "Still waiting for %s->%s transform: %s",
+                raw_imu_frame_.c_str(), body_frame_.c_str(), ex.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    T_body_imu_ = tf_buffer_->lookupTransform(body_frame_, raw_imu_frame_, tf2::TimePointZero);
+    {
+      const auto& r = T_body_imu_.transform.rotation;
+      const rio::Quat q(static_cast<float>(r.w), static_cast<float>(r.x),
+                        static_cast<float>(r.y), static_cast<float>(r.z));
+      R_body_imu_ = q.normalized().toRotationMatrix();
+    }
+    RCLCPP_INFO(get_logger(), "Got static %s->%s transform.",
+        raw_imu_frame_.c_str(), body_frame_.c_str());
+
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
     odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(state_topic_, 10);
@@ -333,8 +377,11 @@ private:
     const double t = std::max(t_acc, t_gyr);
     // RCLCPP_INFO(get_logger(), "Processing IMU sample at t=%.3f (age diff=%.3f s)", t, age_diff);
 
-    const rio::Vec3 f_b(-latest_accel_.x, -latest_accel_.y, latest_accel_.z);
-    const rio::Vec3 w_b(-latest_gyro_.x, -latest_gyro_.y, latest_gyro_.z);
+    // Rotate raw sensor readings into body frame via the static raw_imu→body TF.
+    const rio::Vec3 f_raw(latest_accel_.x, latest_accel_.y, latest_accel_.z);
+    const rio::Vec3 w_raw(latest_gyro_.x,  latest_gyro_.y,  latest_gyro_.z);
+    const rio::Vec3 f_b = R_body_imu_ * f_raw;
+    const rio::Vec3 w_b = R_body_imu_ * w_raw;
 
     // Mark consumed so we don't re-process the same pair
     accel_valid_ = false;
@@ -373,6 +420,25 @@ private:
     eskf_.insPropagation(s, dt);
 
     if (!radar_buf_.empty()) {
+      // If a gimbal TF was captured at radar time, inject the extrinsics before correction.
+      // lookupTransform(body, gimbal) gives:
+      //   translation → p_IR (gimbal origin in body frame)
+      //   rotation R  → maps gimbal→body; so q_IR (body→gimbal) = R^{-1}
+      if (gimbal_tf_valid_) {
+        const auto& tr = latest_gimbal_tf_.transform;
+        const rio::Vec3 p_IR(
+            static_cast<float>(tr.translation.x),
+            static_cast<float>(tr.translation.y),
+            static_cast<float>(tr.translation.z));
+        const rio::Quat q_gimbal_to_body(
+            static_cast<float>(tr.rotation.w),
+            static_cast<float>(tr.rotation.x),
+            static_cast<float>(tr.rotation.y),
+            static_cast<float>(tr.rotation.z));
+        eskf_.setExtrinsics(p_IR, q_gimbal_to_body.inverse());
+        gimbal_tf_valid_ = false;
+      }
+
       // RCLCPP_INFO(get_logger(), "Running correction with %zu radar returns", radar_buf_.size());
       const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), s);
       if (res.n_rejected > 0 || res.n_skipped > 0) {
@@ -425,6 +491,24 @@ private:
       m.sigma = params_rio_.sigma_vr;
 
       radar_buf_.push_back(m);
+    }
+
+    // Look up the gimbal→body transform at the radar measurement timestamp so
+    // p_IR / q_IR reflect the gimbal angle at the time the scan was taken.
+    // lookupTransform(body, gimbal) gives:
+    //   translation = position of gimbal origin in body frame  → p_IR
+    //   rotation    = R that maps gimbal vectors into body     → inverse is q_IR (body→gimbal)
+    const tf2::TimePoint radar_tp(std::chrono::nanoseconds(
+        rclcpp::Time(msg->header.stamp).nanoseconds()));
+    try {
+      latest_gimbal_tf_ = tf_buffer_->lookupTransform(
+          body_frame_, gimbal_frame_, radar_tp, tf2::durationFromSec(0.05));
+      gimbal_tf_valid_ = true;
+    } catch (const tf2::TransformException& ex) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
+          "Failed to look up %s->%s at radar time: %s",
+          gimbal_frame_.c_str(), body_frame_.c_str(), ex.what());
+      gimbal_tf_valid_ = false;
     }
   }
 
@@ -546,6 +630,20 @@ private:
 
   std::vector<rio::RadarDoppler> radar_buf_;
   std::array<float, 21> P0_diag_{};
+
+  // TF2 — static IMU→body and dynamic gimbal→body
+  std::shared_ptr<tf2_ros::Buffer>            tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  geometry_msgs::msg::TransformStamped        T_body_imu_{};
+  rio::Mat3                                   R_body_imu_{rio::Mat3::Identity()};
+
+  geometry_msgs::msg::TransformStamped        latest_gimbal_tf_{};
+  bool                                        gimbal_tf_valid_{false};
+
+  // Frame names (configurable via parameters)
+  std::string raw_imu_frame_{"raw_imu"};
+  std::string body_frame_{"base_link"};
+  std::string gimbal_frame_{"SR_75_base-frame"};
 };
 
 int main(int argc, char** argv) {

@@ -22,7 +22,7 @@
 
       # Gating
       radar_gating_enable: true
-      radar_gate_nsigma: 4.0
+      radar_gate_nsigma: 3.0
 
       # BAD Radar -> IMU extrinsic transformation
       # l_BR_B: [0.06872, 0.01159, -0.06919] # [x y z]
@@ -46,6 +46,10 @@
       radar_topic: '/sr75_node/points'
 
     radar_vr_sign: 1        # flip to -1 if your driver uses opposite Doppler sign
+
+    px4_aiding:
+      enable: true
+      velocity_variance_floor: 0.01  # m²/s² minimum variance per axis
 
     initial_sigma:
         attitude_deg:       [6.0, 6.0, 1.0e-6]

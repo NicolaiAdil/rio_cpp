@@ -11,6 +11,8 @@
 #include "px4_msgs/msg/sensor_accel.hpp"
 #include "px4_msgs/msg/sensor_gyro.hpp"
 
+#include <px4_ros2/navigation/experimental/local_position_measurement_interface.hpp>
+
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "sensor_msgs/point_cloud2_iterator.hpp"
 
@@ -91,31 +93,34 @@ public:
     setupRosInterfaces_();
 
     RCLCPP_INFO(get_logger(),
-      "RIO C++ node configured (PX4 accel+gyro mode):\n"
+      "RIO C++ node configured:\n"
       "  accel_topic=%s\n"
       "  gyro_topic=%s\n"
       "  radar_topic=%s\n"
       "  state_topic=%s\n"
       "  T_acc=%.1f  T_ars=%.1f\n"
+      "  px4_aiding_enable=%s  px4_aiding_var_floor=%.2f\n"
       "  gating_enable=%s  gate_nsigma=%.1f\n"
-      "  p_IR=[%.4f, %.4f, %.4f]\n"
-      "  q_IR=[%.4f, %.4f, %.4f, %.4f]\n"
-      "  vr_sign=%d\n"
+      // "  p_IR=[%.4f, %.4f, %.4f]\n"
+      // "  q_IR=[%.4f, %.4f, %.4f, %.4f]\n"
+      // "  vr_sign=%d\n"
       "----------------------------------------------------------",
       accel_topic_.c_str(), gyro_topic_.c_str(),
       radar_topic_.c_str(), state_topic_.c_str(),
       static_cast<double>(params_rio_.tau_ba),
       static_cast<double>(params_rio_.tau_bg),
+      px4_aiding_enable_ ? "true" : "false",
+      static_cast<double>(px4_aiding_var_floor_),
       params_rio_.gating_enable ? "true" : "false",
-      static_cast<double>(params_rio_.gate_nsigma),
-      static_cast<double>(params_rio_.p_IR.x()),
-      static_cast<double>(params_rio_.p_IR.y()),
-      static_cast<double>(params_rio_.p_IR.z()),
-      static_cast<double>(params_rio_.q_IR.x()),
-      static_cast<double>(params_rio_.q_IR.y()),
-      static_cast<double>(params_rio_.q_IR.z()),
-      static_cast<double>(params_rio_.q_IR.w()),
-      static_cast<int>(params_rio_.vr_sign));
+      static_cast<double>(params_rio_.gate_nsigma));
+      // static_cast<double>(params_rio_.p_IR.x()),
+      // static_cast<double>(params_rio_.p_IR.y()),
+      // static_cast<double>(params_rio_.p_IR.z()),
+      // static_cast<double>(params_rio_.q_IR.x()),
+      // static_cast<double>(params_rio_.q_IR.y()),
+      // static_cast<double>(params_rio_.q_IR.z()),
+      // static_cast<double>(params_rio_.q_IR.w()),
+      // static_cast<int>(params_rio_.vr_sign));
   }
 
 private:
@@ -161,6 +166,10 @@ private:
     this->declare_parameter<std::string>("parameters.raw_imu_frame", "raw_imu");
     this->declare_parameter<std::string>("parameters.body_frame", "base_link");
     this->declare_parameter<std::string>("parameters.gimbal_frame", "SR_75_base-frame");
+
+    // PX4 velocity aiding
+    this->declare_parameter<bool>("px4_aiding.enable", false);
+    this->declare_parameter<double>("px4_aiding.velocity_variance_floor", 0.01);
   }
 
   void loadParamsOrThrow_() {
@@ -268,6 +277,10 @@ private:
     raw_imu_frame_ = this->get_parameter("parameters.raw_imu_frame").as_string();
     body_frame_    = this->get_parameter("parameters.body_frame").as_string();
     gimbal_frame_  = this->get_parameter("parameters.gimbal_frame").as_string();
+
+    px4_aiding_enable_ = this->get_parameter("px4_aiding.enable").as_bool();
+    px4_aiding_var_floor_ = static_cast<float>(
+      this->get_parameter("px4_aiding.velocity_variance_floor").as_double());
   }
 
   void setupRosInterfaces_() {
@@ -319,6 +332,14 @@ private:
     radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       radar_topic_, rclcpp::SensorDataQoS(),
       std::bind(&RioNode::onRadar_, this, std::placeholders::_1));
+
+    if (px4_aiding_enable_) {
+      px4_nav_interface_ = std::make_shared<px4_ros2::LocalPositionMeasurementInterface>(
+        *this,
+        px4_ros2::PoseFrame::Unknown,
+        px4_ros2::VelocityFrame::BodyFRD);
+      RCLCPP_INFO(get_logger(), "PX4 velocity aiding enabled (BodyFRD, xy only)");
+    }
   }
 
   // ----------------------------------------------------------------
@@ -441,8 +462,8 @@ private:
 
       // RCLCPP_INFO(get_logger(), "Running correction with %zu radar returns", radar_buf_.size());
       const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), s);
-      if (res.n_rejected > 0 || res.n_skipped > 0) {
-        RCLCPP_INFO(get_logger(),
+      if (res.n_rejected > res.n_accepted || res.n_skipped > 0) {
+        RCLCPP_WARN(get_logger(),
           "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu",
           res.n_total, res.n_accepted, res.n_rejected, res.n_skipped);
       }
@@ -509,6 +530,36 @@ private:
           "Failed to look up %s->%s at radar time: %s",
           gimbal_frame_.c_str(), body_frame_.c_str(), ex.what());
       gimbal_tf_valid_ = false;
+    }
+  }
+
+  // ---------------- PX4 velocity aiding ----------------
+  void sendVelocityAiding_(const builtin_interfaces::msg::Time& stamp) {
+    const auto& x = eskf_.getState();
+    const auto& P = eskf_.getCovariance();
+
+    // Rotate velocity from NED (W) to body (I) frame
+    const rio::Mat3 R_IW = x.q_WI.conjugate().toRotationMatrix();
+    const rio::Vec3 v_body = R_IW * x.v_WI;
+
+    // Rotate velocity covariance to body frame. TODO: Consider doing whitening
+    const rio::Mat3 P_v_ned = P.block<3, 3>(3, 3);
+    const rio::Mat3 P_v_body = R_IW * P_v_ned * R_IW.transpose();
+
+    const float var_x = std::max(P_v_body(0, 0), px4_aiding_var_floor_);
+    const float var_y = std::max(P_v_body(1, 1), px4_aiding_var_floor_);
+
+    px4_ros2::LocalPositionMeasurement measurement{};
+    measurement.timestamp_sample = rclcpp::Time(stamp);
+    measurement.velocity_xy = Eigen::Vector2f(v_body.x(), v_body.y());
+    measurement.velocity_xy_variance = Eigen::Vector2f(var_x, var_y);
+
+    try {
+      px4_nav_interface_->update(measurement);
+      // RCLCPP_INFO(get_logger(), "PX4 velocity aiding successful");
+    } catch (const px4_ros2::NavigationInterfaceInvalidArgument& e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
+        "PX4 velocity aiding failed: %s", e.what());
     }
   }
 
@@ -591,6 +642,10 @@ private:
     extr.pose.orientation.z = x.q_IR.z();
     extr.pose.orientation.w = x.q_IR.w();
     radar_extr_pub_->publish(extr);
+
+    if (px4_nav_interface_) {
+      sendVelocityAiding_(stamp);
+    }
   }
 
 private:
@@ -644,6 +699,11 @@ private:
   std::string raw_imu_frame_{"raw_imu"};
   std::string body_frame_{"base_link"};
   std::string gimbal_frame_{"SR_75_base-frame"};
+
+  // PX4 velocity aiding
+  bool px4_aiding_enable_{false};
+  float px4_aiding_var_floor_{0.01f};
+  std::shared_ptr<px4_ros2::LocalPositionMeasurementInterface> px4_nav_interface_;
 };
 
 int main(int argc, char** argv) {

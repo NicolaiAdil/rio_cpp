@@ -124,6 +124,7 @@ private:
   // ---------------- Parameters ----------------
   void declareParams_()
   {
+    // clang-format off
     // EKF parameters
     this->declare_parameter<std::vector<double>>("parameters.Q", std::vector<double>(12, 0.0));
     this->declare_parameter<std::vector<double>>("initial_sigma.position", {1e-6, 1e-6, 1e-6});
@@ -131,10 +132,8 @@ private:
     this->declare_parameter<std::vector<double>>("initial_sigma.accel_bias", {1e-2, 1e-2, 1e-2});
     this->declare_parameter<std::vector<double>>("initial_sigma.gyro_bias", {1e-4, 1e-4, 1e-4});
     this->declare_parameter<std::vector<double>>("initial_sigma.attitude_deg", {6.0, 6.0, 1e-6});
-    this->declare_parameter<std::vector<double>>(
-      "initial_sigma.radar_position", {2e-3, 2e-3, 2e-3});
-    this->declare_parameter<std::vector<double>>(
-      "initial_sigma.radar_attitude_deg", {0.5, 0.5, 0.5});
+    this->declare_parameter<std::vector<double>>("initial_sigma.radar_position", {2e-3, 2e-3, 2e-3});
+    this->declare_parameter<std::vector<double>>("initial_sigma.radar_attitude_deg", {0.5, 0.5, 0.5});
 
     this->declare_parameter<double>("parameters.radar_sigma_vr", 0.038);
     this->declare_parameter<double>("parameters.T_acc", 1000.0);
@@ -146,16 +145,14 @@ private:
 
     // Extrinsics: p_IR (IMU->radar in IMU frame), q_IR (rotation IMU->radar) [x y z w]
     this->declare_parameter<std::vector<double>>("parameters.p_IR", {0.0, 0.0, 0.0});
-    this->declare_parameter<std::vector<double>>(
-      "parameters.q_IR", {0.0, 0.0, 0.0, 1.0});  // [x y z w]
+    this->declare_parameter<std::vector<double>>("parameters.q_IR", {0.0, 0.0, 0.0, 1.0});  // [x y z w]
     this->declare_parameter<int>("radar_vr_sign", 1);
 
     // Topics — now separate accel and gyro instead of a single IMU topic
     this->declare_parameter<std::string>("parameters.state_estimate_topic", "/rio/pose");
     this->declare_parameter<std::string>("parameters.accel_topic", "/fmu/out/sensor_accel");
     this->declare_parameter<std::string>("parameters.gyro_topic", "/fmu/out/sensor_gyro");
-    this->declare_parameter<std::string>(
-      "parameters.ekf2_aiding_topic", "/fmu/in/vehicle_visual_odometry");
+    this->declare_parameter<std::string>("parameters.ekf2_aiding_topic", "/fmu/in/vehicle_visual_odometry");
     this->declare_parameter<std::string>("parameters.radar_topic", "/radar/cloud");
 
     // Max age difference (seconds) between accel and gyro to consider them paired
@@ -173,6 +170,7 @@ private:
     // PX4 velocity aiding
     this->declare_parameter<bool>("px4_aiding.enable", false);
     this->declare_parameter<double>("px4_aiding.velocity_variance_floor", 0.01);
+    // clang-format on
   }
 
   void loadParamsOrThrow_()
@@ -320,15 +318,13 @@ private:
 
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-    odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(state_topic_, 10);
-    accel_bias_pub_ =
-      this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/accel_bias", 10);
-    gyro_bias_pub_ =
-      this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/gyro_bias", 10);
-    radar_extr_pub_ =
-      this->create_publisher<geometry_msgs::msg::PoseStamped>("/radar/extrinsics", 10);
-    ekf2_aiding_pub_ =
-      this->create_publisher<px4_msgs::msg::VehicleOdometry>(ekf2_aiding_topic_, 10);
+    // clang-format off
+    odom_pub_        = this->create_publisher<nav_msgs::msg::Odometry>(state_topic_, 10);
+    accel_bias_pub_  = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/accel_bias", 10);
+    gyro_bias_pub_   = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/gyro_bias", 10);
+    radar_extr_pub_  = this->create_publisher<geometry_msgs::msg::PoseStamped>("/radar/extrinsics", 10);
+    ekf2_aiding_pub_ =this->create_publisher<px4_msgs::msg::VehicleOdometry>(ekf2_aiding_topic_, 10);
+    // clang-format on
 
     // Subscribe to PX4 accel and gyro separately
     accel_sub_ = this->create_subscription<px4_msgs::msg::SensorAccel>(
@@ -456,9 +452,11 @@ private:
         const rio::Vec3 p_IR(
           static_cast<float>(tr.translation.x), static_cast<float>(tr.translation.y),
           static_cast<float>(tr.translation.z));
+
         const rio::Quat q_gimbal_to_body(
           static_cast<float>(tr.rotation.w), static_cast<float>(tr.rotation.x),
           static_cast<float>(tr.rotation.y), static_cast<float>(tr.rotation.z));
+
         eskf_.setExtrinsics(p_IR, q_gimbal_to_body.inverse());
         gimbal_tf_valid_ = false;
       }

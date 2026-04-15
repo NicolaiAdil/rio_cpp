@@ -10,7 +10,6 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(px4_msgs REQUIRED)
-find_package(px4_ros2_cpp REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -28,7 +27,6 @@ ament_target_dependencies(rio_node
   std_msgs
   sensor_msgs
   px4_msgs
-  px4_ros2_cpp
   nav_msgs
   geometry_msgs
   tf2

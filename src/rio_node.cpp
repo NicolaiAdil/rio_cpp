@@ -1,65 +1,62 @@
-#include <cmath>
-#include <string>
-#include <vector>
-#include <array>
-#include <mutex>
-#include <thread>
-#include <chrono>
-
-#include "rclcpp/rclcpp.hpp"
-
-#include "px4_msgs/msg/sensor_accel.hpp"
-#include "px4_msgs/msg/sensor_gyro.hpp"
-
-#include <px4_ros2/navigation/experimental/local_position_measurement_interface.hpp>
-
-#include "sensor_msgs/msg/point_cloud2.hpp"
-#include "sensor_msgs/point_cloud2_iterator.hpp"
-
-#include "nav_msgs/msg/odometry.hpp"
-#include "geometry_msgs/msg/vector3_stamped.hpp"
-#include "geometry_msgs/msg/pose_stamped.hpp"
-#include "geometry_msgs/msg/transform_stamped.hpp"
-
-#include "tf2/LinearMath/Quaternion.h"
-#include "tf2_ros/transform_broadcaster.h"
+#include <rio/rio_eskf.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
-#include <rio/rio_eskf.h>
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "geometry_msgs/msg/vector3_stamped.hpp"
+#include "nav_msgs/msg/odometry.hpp"
+#include "px4_msgs/msg/sensor_accel.hpp"
+#include "px4_msgs/msg/sensor_gyro.hpp"
+#include "px4_msgs/msg/vehicle_odometry.hpp"
+#include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
+#include "sensor_msgs/point_cloud2_iterator.hpp"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2_ros/transform_broadcaster.h"
 
-namespace {
+namespace
+{
 
-inline rio::Quat quatFromXYWZ(float x, float y, float z, float w) {
+inline rio::Quat quatFromXYWZ(float x, float y, float z, float w)
+{
   rio::Quat q(w, x, y, z);
   return q.normalized();
 }
 
-inline bool finite3(const rio::Vec3& v) {
+inline bool finite3(const rio::Vec3 & v)
+{
   return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
 }
 
-static inline bool hasField(const sensor_msgs::msg::PointCloud2& msg, const std::string& name) {
-  for (const auto& f : msg.fields) {
+static inline bool hasField(const sensor_msgs::msg::PointCloud2 & msg, const std::string & name)
+{
+  for (const auto & f : msg.fields) {
     if (f.name == name) return true;
   }
   return false;
 }
 
 static inline std::string findFirstExistingField(
-  const sensor_msgs::msg::PointCloud2& msg,
-  const std::initializer_list<const char*>& candidates)
+  const sensor_msgs::msg::PointCloud2 & msg, const std::initializer_list<const char *> & candidates)
 {
-  for (const auto& c : candidates) {
+  for (const auto & c : candidates) {
     if (hasField(msg, c)) return std::string(c);
   }
   return std::string();
 }
 
 static inline std::array<double, 3> getVec3ParamOrThrow(
-  rclcpp::Node* node, const std::string& name)
+  rclcpp::Node * node, const std::string & name)
 {
   const auto v = node->get_parameter(name).as_double_array();
   if (v.size() != 3) {
@@ -71,12 +68,11 @@ static inline std::array<double, 3> getVec3ParamOrThrow(
 static inline double deg2rad(double d) { return d * M_PI / 180.0; }
 
 /// Convert PX4 microsecond timestamp to seconds (double)
-inline double px4UsToSec(uint64_t us) {
-  return static_cast<double>(us) * 1e-6;
-}
+inline double px4UsToSec(uint64_t us) { return static_cast<double>(us) * 1e-6; }
 
 /// Convert a double time (seconds) to a ROS stamp
-inline builtin_interfaces::msg::Time secToStamp(double t) {
+inline builtin_interfaces::msg::Time secToStamp(double t)
+{
   builtin_interfaces::msg::Time stamp;
   stamp.sec = static_cast<int32_t>(std::floor(t));
   stamp.nanosec = static_cast<uint32_t>((t - std::floor(t)) * 1e9);
@@ -85,19 +81,23 @@ inline builtin_interfaces::msg::Time secToStamp(double t) {
 
 }  // namespace
 
-class RioNode final : public rclcpp::Node {
+class RioNode final : public rclcpp::Node
+{
 public:
-  RioNode() : Node("state_estimator_cpp") {
+  RioNode() : Node("state_estimator_cpp")
+  {
     declareParams_();
     loadParamsOrThrow_();
     setupRosInterfaces_();
 
-    RCLCPP_INFO(get_logger(),
+    RCLCPP_INFO(
+      get_logger(),
       "RIO C++ node configured:\n"
       "  accel_topic=%s\n"
       "  gyro_topic=%s\n"
       "  radar_topic=%s\n"
       "  state_topic=%s\n"
+      "  ekf2_aiding_topic=%s\n"
       "  T_acc=%.1f  T_ars=%.1f\n"
       "  px4_aiding_enable=%s  px4_aiding_var_floor=%.2f\n"
       "  gating_enable=%s  gate_nsigma=%.1f\n"
@@ -105,27 +105,25 @@ public:
       // "  q_IR=[%.4f, %.4f, %.4f, %.4f]\n"
       // "  vr_sign=%d\n"
       "----------------------------------------------------------",
-      accel_topic_.c_str(), gyro_topic_.c_str(),
-      radar_topic_.c_str(), state_topic_.c_str(),
-      static_cast<double>(params_rio_.tau_ba),
-      static_cast<double>(params_rio_.tau_bg),
-      px4_aiding_enable_ ? "true" : "false",
-      static_cast<double>(px4_aiding_var_floor_),
-      params_rio_.gating_enable ? "true" : "false",
+      accel_topic_.c_str(), gyro_topic_.c_str(), radar_topic_.c_str(), state_topic_.c_str(),
+      ekf2_aiding_topic_.c_str(), static_cast<double>(params_rio_.tau_ba),
+      static_cast<double>(params_rio_.tau_bg), px4_aiding_enable_ ? "true" : "false",
+      static_cast<double>(px4_aiding_var_floor_), params_rio_.gating_enable ? "true" : "false",
       static_cast<double>(params_rio_.gate_nsigma));
-      // static_cast<double>(params_rio_.p_IR.x()),
-      // static_cast<double>(params_rio_.p_IR.y()),
-      // static_cast<double>(params_rio_.p_IR.z()),
-      // static_cast<double>(params_rio_.q_IR.x()),
-      // static_cast<double>(params_rio_.q_IR.y()),
-      // static_cast<double>(params_rio_.q_IR.z()),
-      // static_cast<double>(params_rio_.q_IR.w()),
-      // static_cast<int>(params_rio_.vr_sign));
+    // static_cast<double>(params_rio_.p_IR.x()),
+    // static_cast<double>(params_rio_.p_IR.y()),
+    // static_cast<double>(params_rio_.p_IR.z()),
+    // static_cast<double>(params_rio_.q_IR.x()),
+    // static_cast<double>(params_rio_.q_IR.y()),
+    // static_cast<double>(params_rio_.q_IR.z()),
+    // static_cast<double>(params_rio_.q_IR.w()),
+    // static_cast<int>(params_rio_.vr_sign));
   }
 
 private:
   // ---------------- Parameters ----------------
-  void declareParams_() {
+  void declareParams_()
+  {
     // EKF parameters
     this->declare_parameter<std::vector<double>>("parameters.Q", std::vector<double>(12, 0.0));
     this->declare_parameter<std::vector<double>>("initial_sigma.position", {1e-6, 1e-6, 1e-6});
@@ -133,8 +131,10 @@ private:
     this->declare_parameter<std::vector<double>>("initial_sigma.accel_bias", {1e-2, 1e-2, 1e-2});
     this->declare_parameter<std::vector<double>>("initial_sigma.gyro_bias", {1e-4, 1e-4, 1e-4});
     this->declare_parameter<std::vector<double>>("initial_sigma.attitude_deg", {6.0, 6.0, 1e-6});
-    this->declare_parameter<std::vector<double>>("initial_sigma.radar_position", {2e-3, 2e-3, 2e-3});
-    this->declare_parameter<std::vector<double>>("initial_sigma.radar_attitude_deg", {0.5, 0.5, 0.5});
+    this->declare_parameter<std::vector<double>>(
+      "initial_sigma.radar_position", {2e-3, 2e-3, 2e-3});
+    this->declare_parameter<std::vector<double>>(
+      "initial_sigma.radar_attitude_deg", {0.5, 0.5, 0.5});
 
     this->declare_parameter<double>("parameters.radar_sigma_vr", 0.038);
     this->declare_parameter<double>("parameters.T_acc", 1000.0);
@@ -146,13 +146,16 @@ private:
 
     // Extrinsics: p_IR (IMU->radar in IMU frame), q_IR (rotation IMU->radar) [x y z w]
     this->declare_parameter<std::vector<double>>("parameters.p_IR", {0.0, 0.0, 0.0});
-    this->declare_parameter<std::vector<double>>("parameters.q_IR", {0.0, 0.0, 0.0, 1.0}); // [x y z w]
+    this->declare_parameter<std::vector<double>>(
+      "parameters.q_IR", {0.0, 0.0, 0.0, 1.0});  // [x y z w]
     this->declare_parameter<int>("radar_vr_sign", 1);
 
     // Topics — now separate accel and gyro instead of a single IMU topic
     this->declare_parameter<std::string>("parameters.state_estimate_topic", "/rio/pose");
     this->declare_parameter<std::string>("parameters.accel_topic", "/fmu/out/sensor_accel");
     this->declare_parameter<std::string>("parameters.gyro_topic", "/fmu/out/sensor_gyro");
+    this->declare_parameter<std::string>(
+      "parameters.ekf2_aiding_topic", "/fmu/in/vehicle_visual_odometry");
     this->declare_parameter<std::string>("parameters.radar_topic", "/radar/cloud");
 
     // Max age difference (seconds) between accel and gyro to consider them paired
@@ -172,12 +175,14 @@ private:
     this->declare_parameter<double>("px4_aiding.velocity_variance_floor", 0.01);
   }
 
-  void loadParamsOrThrow_() {
+  void loadParamsOrThrow_()
+  {
     // Topics
     state_topic_ = this->get_parameter("parameters.state_estimate_topic").as_string();
     accel_topic_ = this->get_parameter("parameters.accel_topic").as_string();
-    gyro_topic_  = this->get_parameter("parameters.gyro_topic").as_string();
+    gyro_topic_ = this->get_parameter("parameters.gyro_topic").as_string();
     radar_topic_ = this->get_parameter("parameters.radar_topic").as_string();
+    ekf2_aiding_topic_ = this->get_parameter("parameters.ekf2_aiding_topic").as_string();
     max_accel_gyro_dt_ = this->get_parameter("parameters.max_accel_gyro_dt").as_double();
 
     // Q (12)
@@ -193,9 +198,9 @@ private:
 
     // Q diag (12) -> noise densities
     p.sigma_acc = static_cast<float>(std::sqrt(std::max(0.0, Qv[0])));
-    p.sigma_ba  = static_cast<float>(std::sqrt(std::max(0.0, Qv[3])));
+    p.sigma_ba = static_cast<float>(std::sqrt(std::max(0.0, Qv[3])));
     p.sigma_gyr = static_cast<float>(std::sqrt(std::max(0.0, Qv[6])));
-    p.sigma_bg  = static_cast<float>(std::sqrt(std::max(0.0, Qv[9])));
+    p.sigma_bg = static_cast<float>(std::sqrt(std::max(0.0, Qv[9])));
 
     // Bias time constants
     p.tau_ba = static_cast<float>(this->get_parameter("parameters.T_acc").as_double());
@@ -206,49 +211,46 @@ private:
     p.min_dt = static_cast<float>(this->get_parameter("parameters.min_dt").as_double());
 
     // Radar measurement params
-    p.sigma_vr      = static_cast<float>(this->get_parameter("parameters.radar_sigma_vr").as_double());
+    p.sigma_vr = static_cast<float>(this->get_parameter("parameters.radar_sigma_vr").as_double());
     p.gating_enable = this->get_parameter("parameters.radar_gating_enable").as_bool();
-    p.gate_nsigma   = static_cast<float>(this->get_parameter("parameters.radar_gate_nsigma").as_double());
-    p.vr_sign       = static_cast<float>(this->get_parameter("radar_vr_sign").as_int());
+    p.gate_nsigma =
+      static_cast<float>(this->get_parameter("parameters.radar_gate_nsigma").as_double());
+    p.vr_sign = static_cast<float>(this->get_parameter("radar_vr_sign").as_int());
 
     // Extrinsics: p_IR, q_IR
     const auto p_ir = this->get_parameter("parameters.p_IR").as_double_array();
     if (p_ir.size() != 3) {
       throw std::runtime_error("parameters.p_IR must have length 3");
     }
-    p.p_IR = rio::Vec3(static_cast<float>(p_ir[0]),
-                       static_cast<float>(p_ir[1]),
-                       static_cast<float>(p_ir[2]));
+    p.p_IR = rio::Vec3(
+      static_cast<float>(p_ir[0]), static_cast<float>(p_ir[1]), static_cast<float>(p_ir[2]));
 
     const auto q_ir = this->get_parameter("parameters.q_IR").as_double_array();
     if (q_ir.size() != 4) {
       throw std::runtime_error("parameters.q_IR must have length 4 [x y z w]");
     }
-    p.q_IR = quatFromXYWZ(static_cast<float>(q_ir[0]),
-                          static_cast<float>(q_ir[1]),
-                          static_cast<float>(q_ir[2]),
-                          static_cast<float>(q_ir[3]));
+    p.q_IR = quatFromXYWZ(
+      static_cast<float>(q_ir[0]), static_cast<float>(q_ir[1]), static_cast<float>(q_ir[2]),
+      static_cast<float>(q_ir[3]));
 
     params_rio_ = p;
     eskf_.setParams(params_rio_);
 
     // Initial covariance (21D): [dp dv dba dtheta dbg dp_IR dtheta_IR]
-    const auto sig_p        = getVec3ParamOrThrow(this, "initial_sigma.position");
-    const auto sig_v        = getVec3ParamOrThrow(this, "initial_sigma.velocity");
-    const auto sig_ba       = getVec3ParamOrThrow(this, "initial_sigma.accel_bias");
-    const auto sig_th_deg   = getVec3ParamOrThrow(this, "initial_sigma.attitude_deg");
-    const auto sig_bg       = getVec3ParamOrThrow(this, "initial_sigma.gyro_bias");
-    const auto sig_pir      = getVec3ParamOrThrow(this, "initial_sigma.radar_position");
+    const auto sig_p = getVec3ParamOrThrow(this, "initial_sigma.position");
+    const auto sig_v = getVec3ParamOrThrow(this, "initial_sigma.velocity");
+    const auto sig_ba = getVec3ParamOrThrow(this, "initial_sigma.accel_bias");
+    const auto sig_th_deg = getVec3ParamOrThrow(this, "initial_sigma.attitude_deg");
+    const auto sig_bg = getVec3ParamOrThrow(this, "initial_sigma.gyro_bias");
+    const auto sig_pir = getVec3ParamOrThrow(this, "initial_sigma.radar_position");
     const auto sig_thir_deg = getVec3ParamOrThrow(this, "initial_sigma.radar_attitude_deg");
 
     const std::array<double, 3> sig_th = {
-      deg2rad(sig_th_deg[0]), deg2rad(sig_th_deg[1]), deg2rad(sig_th_deg[2])
-    };
+      deg2rad(sig_th_deg[0]), deg2rad(sig_th_deg[1]), deg2rad(sig_th_deg[2])};
     const std::array<double, 3> sig_thir = {
-      deg2rad(sig_thir_deg[0]), deg2rad(sig_thir_deg[1]), deg2rad(sig_thir_deg[2])
-    };
+      deg2rad(sig_thir_deg[0]), deg2rad(sig_thir_deg[1]), deg2rad(sig_thir_deg[2])};
 
-    auto fill3 = [&](int start, const std::array<double,3>& s){
+    auto fill3 = [&](int start, const std::array<double, 3> & s) {
       for (int i = 0; i < 3; ++i) {
         const double si = s[i];
         if (!std::isfinite(si) || si < 0.0) {
@@ -258,10 +260,10 @@ private:
       }
     };
 
-    fill3(0,  sig_p);
-    fill3(3,  sig_v);
-    fill3(6,  sig_ba);
-    fill3(9,  sig_th);
+    fill3(0, sig_p);
+    fill3(3, sig_v);
+    fill3(6, sig_ba);
+    fill3(9, sig_th);
     fill3(12, sig_bg);
     fill3(15, sig_pir);
     fill3(18, sig_thir);
@@ -275,50 +277,58 @@ private:
     initialized_time_ = false;
 
     raw_imu_frame_ = this->get_parameter("parameters.raw_imu_frame").as_string();
-    body_frame_    = this->get_parameter("parameters.body_frame").as_string();
-    gimbal_frame_  = this->get_parameter("parameters.gimbal_frame").as_string();
+    body_frame_ = this->get_parameter("parameters.body_frame").as_string();
+    gimbal_frame_ = this->get_parameter("parameters.gimbal_frame").as_string();
 
     px4_aiding_enable_ = this->get_parameter("px4_aiding.enable").as_bool();
-    px4_aiding_var_floor_ = static_cast<float>(
-      this->get_parameter("px4_aiding.velocity_variance_floor").as_double());
+    px4_aiding_var_floor_ =
+      static_cast<float>(this->get_parameter("px4_aiding.velocity_variance_floor").as_double());
   }
 
-  void setupRosInterfaces_() {
+  void setupRosInterfaces_()
+  {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock(), tf2::durationFromSec(10.0));
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     // Block until the static raw_imu->body transform is available.
     // lookupTransform(target, source) returns the transform that maps vectors
     // from source into target, so (body_frame_, raw_imu_frame_) gives R_body_imu.
-    RCLCPP_INFO(get_logger(), "Waiting for static %s->%s transform...",
-        raw_imu_frame_.c_str(), body_frame_.c_str());
+    RCLCPP_INFO(
+      get_logger(), "Waiting for static %s->%s transform...", raw_imu_frame_.c_str(),
+      body_frame_.c_str());
     while (rclcpp::ok()) {
-        try {
-            tf_buffer_->lookupTransform(body_frame_, raw_imu_frame_, tf2::TimePointZero);
-            break;
-        } catch (const tf2::TransformException& ex) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
-                "Still waiting for %s->%s transform: %s",
-                raw_imu_frame_.c_str(), body_frame_.c_str(), ex.what());
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
+      try {
+        tf_buffer_->lookupTransform(body_frame_, raw_imu_frame_, tf2::TimePointZero);
+        break;
+      } catch (const tf2::TransformException & ex) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *this->get_clock(), 2000, "Still waiting for %s->%s transform: %s",
+          raw_imu_frame_.c_str(), body_frame_.c_str(), ex.what());
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
     }
     T_body_imu_ = tf_buffer_->lookupTransform(body_frame_, raw_imu_frame_, tf2::TimePointZero);
     {
-      const auto& r = T_body_imu_.transform.rotation;
-      const rio::Quat q(static_cast<float>(r.w), static_cast<float>(r.x),
-                        static_cast<float>(r.y), static_cast<float>(r.z));
+      const auto & r = T_body_imu_.transform.rotation;
+      const rio::Quat q(
+        static_cast<float>(r.w), static_cast<float>(r.x), static_cast<float>(r.y),
+        static_cast<float>(r.z));
       R_body_imu_ = q.normalized().toRotationMatrix();
     }
-    RCLCPP_INFO(get_logger(), "Got static %s->%s transform.",
-        raw_imu_frame_.c_str(), body_frame_.c_str());
+    RCLCPP_INFO(
+      get_logger(), "Got static %s->%s transform.", raw_imu_frame_.c_str(), body_frame_.c_str());
 
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
     odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(state_topic_, 10);
-    accel_bias_pub_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/accel_bias", 10);
-    gyro_bias_pub_  = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/gyro_bias", 10);
-    radar_extr_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/radar/extrinsics", 10);
+    accel_bias_pub_ =
+      this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/accel_bias", 10);
+    gyro_bias_pub_ =
+      this->create_publisher<geometry_msgs::msg::Vector3Stamped>("/rio/gyro_bias", 10);
+    radar_extr_pub_ =
+      this->create_publisher<geometry_msgs::msg::PoseStamped>("/radar/extrinsics", 10);
+    ekf2_aiding_pub_ =
+      this->create_publisher<px4_msgs::msg::VehicleOdometry>(ekf2_aiding_topic_, 10);
 
     // Subscribe to PX4 accel and gyro separately
     accel_sub_ = this->create_subscription<px4_msgs::msg::SensorAccel>(
@@ -332,20 +342,13 @@ private:
     radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       radar_topic_, rclcpp::SensorDataQoS(),
       std::bind(&RioNode::onRadar_, this, std::placeholders::_1));
-
-    if (px4_aiding_enable_) {
-      px4_nav_interface_ = std::make_shared<px4_ros2::LocalPositionMeasurementInterface>(
-        *this,
-        px4_ros2::PoseFrame::Unknown,
-        px4_ros2::VelocityFrame::BodyFRD);
-      RCLCPP_INFO(get_logger(), "PX4 velocity aiding enabled (BodyFRD, xy only)");
-    }
   }
 
   // ----------------------------------------------------------------
   // PX4 accel callback — store latest, then try to run the filter
   // ----------------------------------------------------------------
-  void onAccel_(const px4_msgs::msg::SensorAccel::SharedPtr msg) {
+  void onAccel_(const px4_msgs::msg::SensorAccel::SharedPtr msg)
+  {
     if (!std::isfinite(msg->x) || !std::isfinite(msg->y) || !std::isfinite(msg->z)) {
       return;
     }
@@ -362,7 +365,8 @@ private:
   // ----------------------------------------------------------------
   // PX4 gyro callback — store latest, then try to run the filter
   // ----------------------------------------------------------------
-  void onGyro_(const px4_msgs::msg::SensorGyro::SharedPtr msg) {
+  void onGyro_(const px4_msgs::msg::SensorGyro::SharedPtr msg)
+  {
     if (!std::isfinite(msg->x) || !std::isfinite(msg->y) || !std::isfinite(msg->z)) {
       return;
     }
@@ -381,7 +385,8 @@ private:
   // Called from whichever callback arrives second.
   // Uses the newer of the two timestamps as the IMU timestamp.
   // ----------------------------------------------------------------
-  void tryProcessImu_() {
+  void tryProcessImu_()
+  {
     if (!accel_valid_ || !gyro_valid_) return;
 
     // Check that accel and gyro are close in time
@@ -400,13 +405,13 @@ private:
 
     // Rotate raw sensor readings into body frame via the static raw_imu→body TF.
     const rio::Vec3 f_raw(latest_accel_.x, latest_accel_.y, latest_accel_.z);
-    const rio::Vec3 w_raw(latest_gyro_.x,  latest_gyro_.y,  latest_gyro_.z);
+    const rio::Vec3 w_raw(latest_gyro_.x, latest_gyro_.y, latest_gyro_.z);
     const rio::Vec3 f_b = R_body_imu_ * f_raw;
     const rio::Vec3 w_b = R_body_imu_ * w_raw;
 
     // Mark consumed so we don't re-process the same pair
     accel_valid_ = false;
-    gyro_valid_  = false;
+    gyro_valid_ = false;
 
     // --- From here the logic mirrors the original onImu_ ---
 
@@ -419,7 +424,8 @@ private:
     // Initialize attitude from gravity
     if (!initialized_att_) {
       if (!eskf_.initAttitudeFromGravity(f_b, P0_diag_.data(), static_cast<float>(t))) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *this->get_clock(), 2000,
           "Waiting for level/stationary IMU for attitude init (|acc|=%.3f)", f_b.norm());
         return;
       }
@@ -433,7 +439,7 @@ private:
     last_imu_time_ = t;
 
     rio::ImuSample s;
-    s.t   = static_cast<float>(t);
+    s.t = static_cast<float>(t);
     s.acc = f_b;
     s.gyr = w_b;
 
@@ -446,16 +452,13 @@ private:
       //   translation → p_IR (gimbal origin in body frame)
       //   rotation R  → maps gimbal→body; so q_IR (body→gimbal) = R^{-1}
       if (gimbal_tf_valid_) {
-        const auto& tr = latest_gimbal_tf_.transform;
+        const auto & tr = latest_gimbal_tf_.transform;
         const rio::Vec3 p_IR(
-            static_cast<float>(tr.translation.x),
-            static_cast<float>(tr.translation.y),
-            static_cast<float>(tr.translation.z));
+          static_cast<float>(tr.translation.x), static_cast<float>(tr.translation.y),
+          static_cast<float>(tr.translation.z));
         const rio::Quat q_gimbal_to_body(
-            static_cast<float>(tr.rotation.w),
-            static_cast<float>(tr.rotation.x),
-            static_cast<float>(tr.rotation.y),
-            static_cast<float>(tr.rotation.z));
+          static_cast<float>(tr.rotation.w), static_cast<float>(tr.rotation.x),
+          static_cast<float>(tr.rotation.y), static_cast<float>(tr.rotation.z));
         eskf_.setExtrinsics(p_IR, q_gimbal_to_body.inverse());
         gimbal_tf_valid_ = false;
       }
@@ -463,8 +466,8 @@ private:
       // RCLCPP_INFO(get_logger(), "Running correction with %zu radar returns", radar_buf_.size());
       const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), s);
       if (res.n_rejected > res.n_accepted || res.n_skipped > 0) {
-        RCLCPP_WARN(get_logger(),
-          "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu",
+        RCLCPP_WARN(
+          get_logger(), "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu",
           res.n_total, res.n_accepted, res.n_rejected, res.n_skipped);
       }
       radar_buf_.clear();
@@ -476,16 +479,17 @@ private:
     publishState_(secToStamp(t));
   }
 
-  void onRadar_(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+  void onRadar_(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
+  {
     if (msg->width * msg->height == 0) return;
 
     if (!hasField(*msg, "x") || !hasField(*msg, "y") || !hasField(*msg, "z")) return;
 
-    const std::string dop_field = findFirstExistingField(
-      *msg, {"doppler", "vr", "v", "velocity", "radial_velocity"});
+    const std::string dop_field =
+      findFirstExistingField(*msg, {"doppler", "vr", "v", "velocity", "radial_velocity"});
     if (dop_field.empty()) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
-        "Radar PointCloud2 missing Doppler field.");
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *this->get_clock(), 2000, "Radar PointCloud2 missing Doppler field.");
       return;
     }
 
@@ -519,24 +523,25 @@ private:
     // lookupTransform(body, gimbal) gives:
     //   translation = position of gimbal origin in body frame  → p_IR
     //   rotation    = R that maps gimbal vectors into body     → inverse is q_IR (body→gimbal)
-    const tf2::TimePoint radar_tp(std::chrono::nanoseconds(
-        rclcpp::Time(msg->header.stamp).nanoseconds()));
+    const tf2::TimePoint radar_tp(
+      std::chrono::nanoseconds(rclcpp::Time(msg->header.stamp).nanoseconds()));
     try {
       latest_gimbal_tf_ = tf_buffer_->lookupTransform(
-          body_frame_, gimbal_frame_, radar_tp, tf2::durationFromSec(0.05));
+        body_frame_, gimbal_frame_, radar_tp, tf2::durationFromSec(0.05));
       gimbal_tf_valid_ = true;
-    } catch (const tf2::TransformException& ex) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
-          "Failed to look up %s->%s at radar time: %s",
-          gimbal_frame_.c_str(), body_frame_.c_str(), ex.what());
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *this->get_clock(), 2000, "Failed to look up %s->%s at radar time: %s",
+        gimbal_frame_.c_str(), body_frame_.c_str(), ex.what());
       gimbal_tf_valid_ = false;
     }
   }
 
   // ---------------- PX4 velocity aiding ----------------
-  void sendVelocityAiding_(const builtin_interfaces::msg::Time& stamp) {
-    const auto& x = eskf_.getState();
-    const auto& P = eskf_.getCovariance();
+  void sendVelocityAiding_(const builtin_interfaces::msg::Time & stamp)
+  {
+    const auto & x = eskf_.getState();
+    const auto & P = eskf_.getCovariance();
 
     // Rotate velocity from NED (W) to body (I) frame
     const rio::Mat3 R_IW = x.q_WI.conjugate().toRotationMatrix();
@@ -549,24 +554,22 @@ private:
     const float var_x = std::max(P_v_body(0, 0), px4_aiding_var_floor_);
     const float var_y = std::max(P_v_body(1, 1), px4_aiding_var_floor_);
 
-    px4_ros2::LocalPositionMeasurement measurement{};
-    measurement.timestamp_sample = rclcpp::Time(stamp);
-    measurement.velocity_xy = Eigen::Vector2f(v_body.x(), v_body.y());
-    measurement.velocity_xy_variance = Eigen::Vector2f(var_x, var_y);
+    px4_msgs::msg::VehicleOdometry odom;
+    odom.timestamp =
+      static_cast<uint64_t>(px4UsToSec(stamp.sec) * 1e6 + px4UsToSec(stamp.nanosec) * 1e6);
+    odom.timestamp_sample = odom.timestamp;
+    odom.velocity_frame = px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_FRD;
+    odom.velocity = {v_body.x(), v_body.y(), NAN};
+    odom.velocity_variance = {var_x, var_y, NAN};
 
-    try {
-      px4_nav_interface_->update(measurement);
-      // RCLCPP_INFO(get_logger(), "PX4 velocity aiding successful");
-    } catch (const px4_ros2::NavigationInterfaceInvalidArgument& e) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
-        "PX4 velocity aiding failed: %s", e.what());
-    }
+    ekf2_aiding_pub_->publish(odom);
   }
 
   // ---------------- Publishing ----------------
-  void publishState_(const builtin_interfaces::msg::Time& stamp) {
-    const auto& x = eskf_.getState();
-    const auto& P = eskf_.getCovariance();
+  void publishState_(const builtin_interfaces::msg::Time & stamp)
+  {
+    const auto & x = eskf_.getState();
+    const auto & P = eskf_.getCovariance();
 
     // TF: ned -> body
     geometry_msgs::msg::TransformStamped tf;
@@ -596,10 +599,9 @@ private:
     odom.pose.pose.orientation.z = x.q_WI.z();
     odom.pose.pose.orientation.w = x.q_WI.w();
 
-    for (double &c : odom.pose.covariance) c = 0.0;
+    for (double & c : odom.pose.covariance) c = 0.0;
     for (int r = 0; r < 3; ++r)
-      for (int c = 0; c < 3; ++c)
-        odom.pose.covariance[r * 6 + c] = static_cast<double>(P(r, c));
+      for (int c = 0; c < 3; ++c) odom.pose.covariance[r * 6 + c] = static_cast<double>(P(r, c));
 
     for (int r = 0; r < 3; ++r)
       for (int c = 0; c < 3; ++c)
@@ -609,7 +611,7 @@ private:
     odom.twist.twist.linear.y = x.v_WI.y();
     odom.twist.twist.linear.z = x.v_WI.z();
 
-    for (double &c : odom.twist.covariance) c = 0.0;
+    for (double & c : odom.twist.covariance) c = 0.0;
     for (int r = 0; r < 3; ++r)
       for (int c = 0; c < 3; ++c)
         odom.twist.covariance[r * 6 + c] = static_cast<double>(P(3 + r, 3 + c));
@@ -643,7 +645,7 @@ private:
     extr.pose.orientation.w = x.q_IR.w();
     radar_extr_pub_->publish(extr);
 
-    if (px4_nav_interface_) {
+    if (px4_aiding_enable_) {
       sendVelocityAiding_(stamp);
     }
   }
@@ -657,6 +659,7 @@ private:
   rclcpp::Subscription<px4_msgs::msg::SensorAccel>::SharedPtr accel_sub_;
   rclcpp::Subscription<px4_msgs::msg::SensorGyro>::SharedPtr gyro_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr radar_sub_;
+  rclcpp::Publisher<px4_msgs::msg::VehicleOdometry>::SharedPtr ekf2_aiding_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr accel_bias_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr gyro_bias_pub_;
@@ -668,11 +671,18 @@ private:
   std::string accel_topic_;
   std::string gyro_topic_;
   std::string radar_topic_;
+  std::string ekf2_aiding_topic_;
   double max_accel_gyro_dt_{0.005};
 
   // Latest buffered accel/gyro samples for pairing
-  struct { float x{0}, y{0}, z{0}; } latest_accel_;
-  struct { float x{0}, y{0}, z{0}; } latest_gyro_;
+  struct
+  {
+    float x{0}, y{0}, z{0};
+  } latest_accel_;
+  struct
+  {
+    float x{0}, y{0}, z{0};
+  } latest_gyro_;
   uint64_t latest_accel_time_us_{0};
   uint64_t latest_gyro_time_us_{0};
   bool accel_valid_{false};
@@ -687,13 +697,13 @@ private:
   std::array<float, 21> P0_diag_{};
 
   // TF2 — static IMU→body and dynamic gimbal→body
-  std::shared_ptr<tf2_ros::Buffer>            tf_buffer_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-  geometry_msgs::msg::TransformStamped        T_body_imu_{};
-  rio::Mat3                                   R_body_imu_{rio::Mat3::Identity()};
+  geometry_msgs::msg::TransformStamped T_body_imu_{};
+  rio::Mat3 R_body_imu_{rio::Mat3::Identity()};
 
-  geometry_msgs::msg::TransformStamped        latest_gimbal_tf_{};
-  bool                                        gimbal_tf_valid_{false};
+  geometry_msgs::msg::TransformStamped latest_gimbal_tf_{};
+  bool gimbal_tf_valid_{false};
 
   // Frame names (configurable via parameters)
   std::string raw_imu_frame_{"raw_imu"};
@@ -703,10 +713,10 @@ private:
   // PX4 velocity aiding
   bool px4_aiding_enable_{false};
   float px4_aiding_var_floor_{0.01f};
-  std::shared_ptr<px4_ros2::LocalPositionMeasurementInterface> px4_nav_interface_;
 };
 
-int main(int argc, char** argv) {
+int main(int argc, char ** argv)
+{
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<RioNode>());
   rclcpp::shutdown();

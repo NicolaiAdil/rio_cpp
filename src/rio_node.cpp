@@ -16,6 +16,7 @@
 #include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "px4_msgs/msg/sensor_accel.hpp"
+#include "px4_msgs/msg/sensor_combined.hpp"
 #include "px4_msgs/msg/sensor_gyro.hpp"
 #include "px4_msgs/msg/vehicle_odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -153,6 +154,7 @@ private:
     this->declare_parameter<std::string>("parameters.accel_topic", "/fmu/out/sensor_accel");
     this->declare_parameter<std::string>("parameters.gyro_topic", "/fmu/out/sensor_gyro");
     this->declare_parameter<std::string>("parameters.ekf2_aiding_topic", "/fmu/in/vehicle_visual_odometry");
+    this->declare_parameter<std::string>("parameters.imu_topic", "/fmu/out/sensor_combined");
     this->declare_parameter<std::string>("parameters.radar_topic", "/radar/cloud");
 
     // Max age difference (seconds) between accel and gyro to consider them paired
@@ -181,6 +183,7 @@ private:
     gyro_topic_ = this->get_parameter("parameters.gyro_topic").as_string();
     radar_topic_ = this->get_parameter("parameters.radar_topic").as_string();
     ekf2_aiding_topic_ = this->get_parameter("parameters.ekf2_aiding_topic").as_string();
+    imu_topic_ = this->get_parameter("parameters.imu_topic").as_string();
     max_accel_gyro_dt_ = this->get_parameter("parameters.max_accel_gyro_dt").as_double();
 
     // Q (12)
@@ -327,13 +330,17 @@ private:
     // clang-format on
 
     // Subscribe to PX4 accel and gyro separately
-    accel_sub_ = this->create_subscription<px4_msgs::msg::SensorAccel>(
-      accel_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&RioNode::onAccel_, this, std::placeholders::_1));
+    // accel_sub_ = this->create_subscription<px4_msgs::msg::SensorAccel>(
+    //   accel_topic_, rclcpp::SensorDataQoS(),
+    //   std::bind(&RioNode::onAccel_, this, std::placeholders::_1));
 
-    gyro_sub_ = this->create_subscription<px4_msgs::msg::SensorGyro>(
-      gyro_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&RioNode::onGyro_, this, std::placeholders::_1));
+    // gyro_sub_ = this->create_subscription<px4_msgs::msg::SensorGyro>(
+    //   gyro_topic_, rclcpp::SensorDataQoS(),
+    //   std::bind(&RioNode::onGyro_, this, std::placeholders::_1));
+
+    imu_sub_ = this->create_subscription<px4_msgs::msg::SensorCombined>(
+      imu_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&RioNode::onImu_, this, std::placeholders::_1));
 
     radar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       radar_topic_, rclcpp::SensorDataQoS(),
@@ -372,6 +379,30 @@ private:
     latest_gyro_.z = msg->z;
     latest_gyro_time_us_ = msg->timestamp_sample;
     gyro_valid_ = true;
+
+    tryProcessImu_();
+  }
+
+  void onImu_(const px4_msgs::msg::SensorCombined::SharedPtr msg)
+  {
+    if (
+      !std::isfinite(msg->gyro_rad[0]) || !std::isfinite(msg->gyro_rad[1]) ||
+      !std::isfinite(msg->gyro_rad[2]) || !std::isfinite(msg->accelerometer_m_s2[0]) ||
+      !std::isfinite(msg->accelerometer_m_s2[1]) || !std::isfinite(msg->accelerometer_m_s2[2])) {
+      return;
+    }
+
+    latest_gyro_.x = msg->gyro_rad[0];
+    latest_gyro_.y = msg->gyro_rad[1];
+    latest_gyro_.z = msg->gyro_rad[2];
+    latest_gyro_time_us_ = msg->timestamp;
+    gyro_valid_ = true;
+
+    latest_accel_.x = msg->accelerometer_m_s2[0];
+    latest_accel_.y = msg->accelerometer_m_s2[1];
+    latest_accel_.z = msg->accelerometer_m_s2[2];
+    latest_accel_time_us_ = msg->timestamp;
+    accel_valid_ = true;
 
     tryProcessImu_();
   }
@@ -654,6 +685,7 @@ private:
   rio::Params params_rio_{};
 
   // ROS interfaces
+  rclcpp::Subscription<px4_msgs::msg::SensorCombined>::SharedPtr imu_sub_;
   rclcpp::Subscription<px4_msgs::msg::SensorAccel>::SharedPtr accel_sub_;
   rclcpp::Subscription<px4_msgs::msg::SensorGyro>::SharedPtr gyro_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr radar_sub_;
@@ -666,6 +698,7 @@ private:
 
   // Parameters
   std::string state_topic_;
+  std::string imu_topic_;
   std::string accel_topic_;
   std::string gyro_topic_;
   std::string radar_topic_;

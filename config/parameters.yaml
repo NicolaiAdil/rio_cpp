@@ -49,7 +49,8 @@
 
     px4_aiding:
       enable: true
-      velocity_variance_floor: 0.01  # m²/s² minimum variance per axis
+      velocity_variance_floor: 0.0  # m²/s² minimum variance per axis
+      max_rate_hz: 50.0
 
     initial_sigma:
         attitude_deg:       [6.0, 6.0, 1.0e-6]

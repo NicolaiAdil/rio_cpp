@@ -172,6 +172,7 @@ private:
     // PX4 velocity aiding
     this->declare_parameter<bool>("px4_aiding.enable", false);
     this->declare_parameter<double>("px4_aiding.velocity_variance_floor", 0.01);
+    this->declare_parameter<double>("px4_aiding.max_rate_hz", 40.0);
     // clang-format on
   }
 
@@ -276,6 +277,7 @@ private:
 
     initialized_att_ = false;
     initialized_time_ = false;
+    initalized_radar_ = false;
 
     raw_imu_frame_ = this->get_parameter("parameters.raw_imu_frame").as_string();
     body_frame_ = this->get_parameter("parameters.body_frame").as_string();
@@ -284,7 +286,8 @@ private:
     px4_aiding_enable_ = this->get_parameter("px4_aiding.enable").as_bool();
     px4_aiding_var_floor_ =
       static_cast<float>(this->get_parameter("px4_aiding.velocity_variance_floor").as_double());
-  }
+    px4_aiding_max_rate_hz_ = this->get_parameter("px4_aiding.max_rate_hz").as_double();
+    }
 
   void setupRosInterfaces_()
   {
@@ -564,6 +567,11 @@ private:
         gimbal_frame_.c_str(), body_frame_.c_str(), ex.what());
       gimbal_tf_valid_ = false;
     }
+
+    if (!initalized_radar_) {
+        RCLCPP_INFO(get_logger(), "Received first radar measurement");
+        initalized_radar_ = true;
+    }
   }
 
   // ---------------- PX4 velocity aiding ----------------
@@ -572,24 +580,37 @@ private:
     const auto & x = eskf_.getState();
     const auto & P = eskf_.getCovariance();
 
-    // Rotate velocity from NED (W) to body (I) frame
+    // Rotate velocity from NED (W) to body (FRD) frame
     const rio::Mat3 R_IW = x.q_WI.conjugate().toRotationMatrix();
     const rio::Vec3 v_body = R_IW * x.v_WI;
 
-    // Rotate velocity covariance to body frame. TODO: Consider doing whitening
+    // Rotate velocity covariance to body frame
     const rio::Mat3 P_v_ned = P.block<3, 3>(3, 3);
     const rio::Mat3 P_v_body = R_IW * P_v_ned * R_IW.transpose();
 
+    // Apply variance floor to avoid sending near-zero variances
     const float var_x = std::max(P_v_body(0, 0), px4_aiding_var_floor_);
     const float var_y = std::max(P_v_body(1, 1), px4_aiding_var_floor_);
+    const float var_z = std::max(P_v_body(2, 2), px4_aiding_var_floor_);
 
     px4_msgs::msg::VehicleOdometry odom;
-    odom.timestamp =
-      static_cast<uint64_t>(px4UsToSec(stamp.sec) * 1e6 + px4UsToSec(stamp.nanosec) * 1e6);
+    odom.timestamp        = static_cast<uint64_t>(stamp.sec * 1000000ULL + stamp.nanosec / 1000ULL);
     odom.timestamp_sample = odom.timestamp;
-    odom.velocity_frame = px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_FRD;
-    odom.velocity = {v_body.x(), v_body.y(), NAN};
-    odom.velocity_variance = {var_x, var_y, NAN};
+
+    // Not providing pose — set to NaN so EKF2 ignores these fields
+    odom.pose_frame  = px4_msgs::msg::VehicleOdometry::POSE_FRAME_UNKNOWN;
+    odom.position    = {NAN, NAN, NAN};
+    odom.q           = {NAN, NAN, NAN, NAN};
+    odom.position_variance    = {NAN, NAN, NAN};
+    odom.orientation_variance = {NAN, NAN, NAN};
+
+    // XY velocity in FRD body frame, Z not provided
+    odom.velocity_frame    = px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_FRD;
+    odom.velocity          = {v_body.x(), v_body.y(), v_body.z()}; 
+    odom.velocity_variance = {var_x, var_y, var_z*1.0f};
+    odom.angular_velocity  = {NAN, NAN, NAN};
+
+    odom.quality = 100; // TODO: set this to 0 if filter divergence is detected?
 
     ekf2_aiding_pub_->publish(odom);
   }
@@ -675,7 +696,12 @@ private:
     radar_extr_pub_->publish(extr);
 
     if (px4_aiding_enable_) {
-      sendVelocityAiding_(stamp);
+      const double now = stamp.sec + stamp.nanosec * 1e-9;
+      const double min_interval = 1.0 / px4_aiding_max_rate_hz_;
+      if (now - last_aiding_time_ >= min_interval) {
+          sendVelocityAiding_(stamp);
+          last_aiding_time_ = now;
+      }
     }
   }
 
@@ -722,6 +748,7 @@ private:
   // State
   bool initialized_att_{false};
   bool initialized_time_{false};
+  bool initalized_radar_{false};
   double last_imu_time_{0.0};
 
   std::vector<rio::RadarDoppler> radar_buf_;
@@ -744,6 +771,8 @@ private:
   // PX4 velocity aiding
   bool px4_aiding_enable_{false};
   float px4_aiding_var_floor_{0.01f};
+  double px4_aiding_max_rate_hz_{40.0};
+  double last_aiding_time_{0.0};
 };
 
 int main(int argc, char ** argv)

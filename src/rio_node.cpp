@@ -497,6 +497,9 @@ private:
 
       // RCLCPP_INFO(get_logger(), "Running correction with %zu radar returns", radar_buf_.size());
       const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), s);
+      if (res.n_total > 0) {
+        latest_quality_ = static_cast<int>(res.n_accepted * 100 / res.n_total);
+      }
       if (res.n_rejected > res.n_accepted || res.n_skipped > 0) {
         RCLCPP_WARN(
           get_logger(), "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu",
@@ -507,8 +510,7 @@ private:
       eskf_.advancePriorToPosterior();
     }
 
-    // Publish using a ROS stamp derived from the PX4 time
-    publishState_(secToStamp(t));
+    publishState_(secToStamp(t), latest_quality_);
   }
 
   void onRadar_(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -574,49 +576,75 @@ private:
     }
   }
 
-  // ---------------- PX4 velocity aiding ----------------
-  void sendVelocityAiding_(const builtin_interfaces::msg::Time & stamp)
+  // ---------------- PX4 aiding ----------------
+  void sendOdometryAiding_(const builtin_interfaces::msg::Time & stamp, int quality)
   {
     const auto & x = eskf_.getState();
     const auto & P = eskf_.getCovariance();
 
-    // Rotate velocity from NED (W) to body (FRD) frame
+    // Velocity: rotate NED -> FRD body frame
     const rio::Mat3 R_IW = x.q_WI.conjugate().toRotationMatrix();
     const rio::Vec3 v_body = R_IW * x.v_WI;
-
-    // Rotate velocity covariance to body frame
-    const rio::Mat3 P_v_ned = P.block<3, 3>(3, 3);
+    const rio::Mat3 P_v_ned  = P.block<3, 3>(3, 3);
     const rio::Mat3 P_v_body = R_IW * P_v_ned * R_IW.transpose();
 
-    // Apply variance floor to avoid sending near-zero variances
-    const float var_x = std::max(P_v_body(0, 0), px4_aiding_var_floor_);
-    const float var_y = std::max(P_v_body(1, 1), px4_aiding_var_floor_);
-    const float var_z = std::max(P_v_body(2, 2), px4_aiding_var_floor_);
+    // Position covariance (NED, local frame)
+    const rio::Mat3 P_p = P.block<3, 3>(0, 0);
+
+    // Attitude covariance (body frame, from error-state indices 9-11)
+    const rio::Mat3 P_att = P.block<3, 3>(9, 9);
 
     px4_msgs::msg::VehicleOdometry odom;
     odom.timestamp        = static_cast<uint64_t>(stamp.sec * 1000000ULL + stamp.nanosec / 1000ULL);
     odom.timestamp_sample = odom.timestamp;
 
-    // Not providing pose — set to NaN so EKF2 ignores these fields
-    odom.pose_frame  = px4_msgs::msg::VehicleOdometry::POSE_FRAME_UNKNOWN;
-    odom.position    = {NAN, NAN, NAN};
-    odom.q           = {NAN, NAN, NAN, NAN};
-    odom.position_variance    = {NAN, NAN, NAN};
-    odom.orientation_variance = {NAN, NAN, NAN};
+    // --- Position (NED local frame) ---
+    odom.pose_frame = px4_msgs::msg::VehicleOdometry::POSE_FRAME_NED;
+    odom.position   = {
+      static_cast<float>(x.p_WI.x()),
+      static_cast<float>(x.p_WI.y()),
+      static_cast<float>(x.p_WI.z())
+    };
+    odom.position_variance = {
+      std::max(P_p(0, 0), px4_aiding_var_floor_),
+      std::max(P_p(1, 1), px4_aiding_var_floor_),
+      std::max(P_p(2, 2), px4_aiding_var_floor_)
+    };
 
-    // XY velocity in FRD body frame, Z not provided
-    odom.velocity_frame    = px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_FRD;
-    odom.velocity          = {v_body.x(), v_body.y(), v_body.z()}; 
-    odom.velocity_variance = {var_x, var_y, var_z*1.0f};
-    odom.angular_velocity  = {NAN, NAN, NAN};
+    // --- Orientation (q_WI: NED -> body) ---
+    odom.q = {
+      static_cast<float>(x.q_WI.w()),
+      static_cast<float>(x.q_WI.x()),
+      static_cast<float>(x.q_WI.y()),
+      static_cast<float>(x.q_WI.z())
+    };
+    odom.orientation_variance = {
+      std::max(P_att(0, 0), px4_aiding_var_floor_),
+      std::max(P_att(1, 1), px4_aiding_var_floor_),
+      std::max(P_att(2, 2), px4_aiding_var_floor_)
+    };
 
-    odom.quality = 100; // TODO: set this to 0 if filter divergence is detected?
+    // --- Velocity (FRD body frame) ---
+    odom.velocity_frame = px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_FRD;
+    odom.velocity       = {
+      static_cast<float>(v_body.x()),
+      static_cast<float>(v_body.y()),
+      static_cast<float>(v_body.z())
+    };
+    odom.velocity_variance = {
+      std::max(P_v_body(0, 0), px4_aiding_var_floor_),
+      std::max(P_v_body(1, 1), px4_aiding_var_floor_),
+      std::max(P_v_body(2, 2), px4_aiding_var_floor_)
+    };
+
+    odom.angular_velocity = {NAN, NAN, NAN};
+    odom.quality = quality;
 
     ekf2_aiding_pub_->publish(odom);
   }
 
   // ---------------- Publishing ----------------
-  void publishState_(const builtin_interfaces::msg::Time & stamp)
+  void publishState_(const builtin_interfaces::msg::Time & stamp, int quality)
   {
     const auto & x = eskf_.getState();
     const auto & P = eskf_.getCovariance();
@@ -699,7 +727,7 @@ private:
       const double now = stamp.sec + stamp.nanosec * 1e-9;
       const double min_interval = 1.0 / px4_aiding_max_rate_hz_;
       if (now - last_aiding_time_ >= min_interval) {
-          sendVelocityAiding_(stamp);
+          sendOdometryAiding_(stamp, quality);
           last_aiding_time_ = now;
       }
     }
@@ -773,6 +801,7 @@ private:
   float px4_aiding_var_floor_{0.01f};
   double px4_aiding_max_rate_hz_{40.0};
   double last_aiding_time_{0.0};
+  int latest_quality_{0};
 };
 
 int main(int argc, char ** argv)

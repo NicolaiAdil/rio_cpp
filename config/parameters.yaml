@@ -22,7 +22,7 @@
 
       # Gating
       radar_gating_enable: true
-      radar_gate_nsigma: 3.0
+      radar_gate_nsigma: 5.0
 
       # BAD Radar -> IMU extrinsic transformation
       # l_BR_B: [0.06872, 0.01159, -0.06919] # [x y z]
@@ -55,9 +55,9 @@
     initial_sigma:
         attitude_deg:       [6.0, 6.0, 1.0e-6]
         position:           [1.0e-6, 1.0e-6, 1.0e-6]
-        velocity:           [1.0e-1, 1.0e-1, 1.0e-1]
-        accel_bias:         [1.0e-2, 1.0e-2, 1.0e-2]
-        gyro_bias:          [1.0e-4, 1.0e-4, 1.0e-4]
+        velocity:           [1.0e-3, 1.0e-3, 1.0e-3]
+        accel_bias:         [1.0e-4, 1.0e-4, 1.0e-4]
+        gyro_bias:          [1.0e-5, 1.0e-5, 1.0e-5]
         # approx equal to zero to disable extrinsic estimation
         radar_position:     [1.0e-9, 1.0e-9, 1.0e-9] 
         radar_attitude_deg: [1.0e-9, 1.0e-9, 1.0e-9]

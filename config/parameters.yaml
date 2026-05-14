@@ -14,7 +14,7 @@
         1.94955148e-8, 1.94955148e-8, 1.94955148e-8,   # [ (rad / s / sqrt(Hz))^2] gyro white 
         1.94955148e-9, 1.94955148e-9, 1.94955148e-9    # [ (rad / s^2 / sqrt(Hz))^2 ] gyro bias RW
       ]
-      radar_sigma_vr: 0.12    # per-return Doppler noise (m/s)
+      radar_sigma_vr: 0.038    # per-return Doppler noise (m/s) 0.12
 
       # Time constants for the bias models, chosen based on the matlab example
       T_acc: 700.0 # Eq. 14.195 in Fossen 2nd edition
@@ -22,7 +22,7 @@
 
       # Gating
       radar_gating_enable: true
-      radar_gate_nsigma: 5.0
+      radar_gate_nsigma: 3.0
 
       # BAD Radar -> IMU extrinsic transformation
       # l_BR_B: [0.06872, 0.01159, -0.06919] # [x y z]
@@ -38,11 +38,7 @@
 
       # ROS2 PARAMETERS
       state_estimate_topic: '/rio/pose' # Publisher
-      # imu_topic: '/vectornav_driver_node/imu/data'
-      gyro_topic: '/fmu/out/sensor_gyro'
-      accel_topic: '/fmu/out/sensor_accel'
-      # fix_topic: '/fix'
-      # heading_topic: '/heading'
+      imu_topic: '/fmu/out/sensor_combined'
       radar_topic: '/sr75_node/points'
 
     radar_vr_sign: 1        # flip to -1 if your driver uses opposite Doppler sign
@@ -56,10 +52,10 @@
         attitude_deg:       [6.0, 6.0, 1.0e-6]
         position:           [1.0e-6, 1.0e-6, 1.0e-6]
         velocity:           [1.0e-3, 1.0e-3, 1.0e-3]
-        accel_bias:         [1.0e-4, 1.0e-4, 1.0e-4]
-        gyro_bias:          [1.0e-5, 1.0e-5, 1.0e-5]
+        accel_bias:         [1.0e-2, 1.0e-2, 1.0e-2]
+        gyro_bias:          [1.0e-3, 1.0e-3, 1.0e-3]
         # approx equal to zero to disable extrinsic estimation
-        radar_position:     [1.0e-9, 1.0e-9, 1.0e-9] 
-        radar_attitude_deg: [1.0e-9, 1.0e-9, 1.0e-9]
+        radar_position:     [1.0e-6, 1.0e-6, 1.0e-6] 
+        radar_attitude_deg: [1.0e-6, 1.0e-6, 1.0e-6]
 
   

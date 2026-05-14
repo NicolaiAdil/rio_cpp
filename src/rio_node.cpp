@@ -94,23 +94,25 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "RIO C++ node configured:\n"
-      "  accel_topic=%s\n"
-      "  gyro_topic=%s\n"
+      "  imu_topic=%s\n"
       "  radar_topic=%s\n"
       "  state_topic=%s\n"
       "  ekf2_aiding_topic=%s\n"
       "  T_acc=%.1f  T_ars=%.1f\n"
       "  px4_aiding_enable=%s  px4_aiding_var_floor=%.2f\n"
       "  gating_enable=%s  gate_nsigma=%.1f\n"
+      "  sigma_vr=%.2f\n"
       // "  p_IR=[%.4f, %.4f, %.4f]\n"
       // "  q_IR=[%.4f, %.4f, %.4f, %.4f]\n"
       // "  vr_sign=%d\n"
       "----------------------------------------------------------",
-      accel_topic_.c_str(), gyro_topic_.c_str(), radar_topic_.c_str(), state_topic_.c_str(),
+      imu_topic_.c_str(), radar_topic_.c_str(), state_topic_.c_str(),
       ekf2_aiding_topic_.c_str(), static_cast<double>(params_rio_.tau_ba),
       static_cast<double>(params_rio_.tau_bg), px4_aiding_enable_ ? "true" : "false",
       static_cast<double>(px4_aiding_var_floor_), params_rio_.gating_enable ? "true" : "false",
-      static_cast<double>(params_rio_.gate_nsigma));
+      static_cast<double>(params_rio_.gate_nsigma),
+      static_cast<double>(params_rio_.sigma_vr)
+       );
     // static_cast<double>(params_rio_.p_IR.x()),
     // static_cast<double>(params_rio_.p_IR.y()),
     // static_cast<double>(params_rio_.p_IR.z()),
@@ -151,8 +153,6 @@ private:
 
     // Topics — now separate accel and gyro instead of a single IMU topic
     this->declare_parameter<std::string>("parameters.state_estimate_topic", "/rio/pose");
-    this->declare_parameter<std::string>("parameters.accel_topic", "/fmu/out/sensor_accel");
-    this->declare_parameter<std::string>("parameters.gyro_topic", "/fmu/out/sensor_gyro");
     this->declare_parameter<std::string>("parameters.ekf2_aiding_topic", "/fmu/in/vehicle_visual_odometry");
     this->declare_parameter<std::string>("parameters.imu_topic", "/fmu/out/sensor_combined");
     this->declare_parameter<std::string>("parameters.radar_topic", "/radar/cloud");
@@ -180,8 +180,6 @@ private:
   {
     // Topics
     state_topic_ = this->get_parameter("parameters.state_estimate_topic").as_string();
-    accel_topic_ = this->get_parameter("parameters.accel_topic").as_string();
-    gyro_topic_ = this->get_parameter("parameters.gyro_topic").as_string();
     radar_topic_ = this->get_parameter("parameters.radar_topic").as_string();
     ekf2_aiding_topic_ = this->get_parameter("parameters.ekf2_aiding_topic").as_string();
     imu_topic_ = this->get_parameter("parameters.imu_topic").as_string();
@@ -331,15 +329,6 @@ private:
     radar_extr_pub_  = this->create_publisher<geometry_msgs::msg::PoseStamped>("/radar/extrinsics", 10);
     ekf2_aiding_pub_ =this->create_publisher<px4_msgs::msg::VehicleOdometry>(ekf2_aiding_topic_, 10);
     // clang-format on
-
-    // Subscribe to PX4 accel and gyro separately
-    // accel_sub_ = this->create_subscription<px4_msgs::msg::SensorAccel>(
-    //   accel_topic_, rclcpp::SensorDataQoS(),
-    //   std::bind(&RioNode::onAccel_, this, std::placeholders::_1));
-
-    // gyro_sub_ = this->create_subscription<px4_msgs::msg::SensorGyro>(
-    //   gyro_topic_, rclcpp::SensorDataQoS(),
-    //   std::bind(&RioNode::onGyro_, this, std::placeholders::_1));
 
     imu_sub_ = this->create_subscription<px4_msgs::msg::SensorCombined>(
       imu_topic_, rclcpp::SensorDataQoS(),
@@ -753,8 +742,6 @@ private:
   // Parameters
   std::string state_topic_;
   std::string imu_topic_;
-  std::string accel_topic_;
-  std::string gyro_topic_;
   std::string radar_topic_;
   std::string ekf2_aiding_topic_;
   double max_accel_gyro_dt_{0.005};

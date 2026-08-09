@@ -53,4 +53,9 @@ install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
 )
 
+# Python debug dashboard (standalone script; run via `ros2 run rio_cpp rio_dashboard.py`)
+install(PROGRAMS tools/rio_dashboard.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

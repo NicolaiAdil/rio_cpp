@@ -1,4 +1,5 @@
 #include <rio/rio_eskf.h>
+#include <rio/measurements/radar_doppler.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
@@ -32,6 +33,18 @@ inline rio::Quat quatFromXYWZ(float x, float y, float z, float w)
 {
   rio::Quat q(w, x, y, z);
   return q.normalized();
+}
+
+/// Rotation-vector (exact inverse of rio::quatExpSmall) for error-state injection.
+inline rio::Vec3 quatLog(const rio::Quat & q_in)
+{
+  rio::Quat q = q_in.normalized();
+  if (q.w() < 0.0f) q.coeffs() = -q.coeffs();  // shortest arc
+  const rio::Vec3 v = q.vec();
+  const float nv = v.norm();
+  if (nv < 1e-8f) return 2.0f * v;  // small-angle limit
+  const float angle = 2.0f * std::atan2(nv, q.w());
+  return (angle / nv) * v;
 }
 
 inline bool finite3(const rio::Vec3 & v)
@@ -109,8 +122,8 @@ public:
       accel_topic_.c_str(), gyro_topic_.c_str(), radar_topic_.c_str(), state_topic_.c_str(),
       ekf2_aiding_topic_.c_str(), static_cast<double>(params_rio_.tau_ba),
       static_cast<double>(params_rio_.tau_bg), px4_aiding_enable_ ? "true" : "false",
-      static_cast<double>(px4_aiding_var_floor_), params_rio_.gating_enable ? "true" : "false",
-      static_cast<double>(params_rio_.gate_nsigma));
+      static_cast<double>(px4_aiding_var_floor_), radar_params_.gating ? "true" : "false",
+      static_cast<double>(radar_params_.gate_nsigma));
     // static_cast<double>(params_rio_.p_IR.x()),
     // static_cast<double>(params_rio_.p_IR.y()),
     // static_cast<double>(params_rio_.p_IR.z()),
@@ -211,12 +224,14 @@ private:
     p.max_dt = static_cast<float>(this->get_parameter("parameters.max_dt").as_double());
     p.min_dt = static_cast<float>(this->get_parameter("parameters.min_dt").as_double());
 
-    // Radar measurement params
-    p.sigma_vr = static_cast<float>(this->get_parameter("parameters.radar_sigma_vr").as_double());
-    p.gating_enable = this->get_parameter("parameters.radar_gating_enable").as_bool();
-    p.gate_nsigma =
+    // Radar measurement params — these now live on the per-measurement
+    // RadarDopplerMeasurement::Params, not on rio::Params.
+    radar_params_.sigma_vr =
+      static_cast<float>(this->get_parameter("parameters.radar_sigma_vr").as_double());
+    radar_params_.gating = this->get_parameter("parameters.radar_gating_enable").as_bool();
+    radar_params_.gate_nsigma =
       static_cast<float>(this->get_parameter("parameters.radar_gate_nsigma").as_double());
-    p.vr_sign = static_cast<float>(this->get_parameter("radar_vr_sign").as_int());
+    radar_params_.vr_sign = static_cast<float>(this->get_parameter("radar_vr_sign").as_int());
 
     // Extrinsics: p_IR, q_IR
     const auto p_ir = this->get_parameter("parameters.p_IR").as_double_array();
@@ -488,16 +503,38 @@ private:
           static_cast<float>(tr.rotation.w), static_cast<float>(tr.rotation.x),
           static_cast<float>(tr.rotation.y), static_cast<float>(tr.rotation.z));
 
-        eskf_.setExtrinsics(p_IR, q_gimbal_to_body.inverse());
+        injectExtrinsics_(p_IR, q_gimbal_to_body.inverse());
         gimbal_tf_valid_ = false;
       }
 
       // RCLCPP_INFO(get_logger(), "Running correction with %zu radar returns", radar_buf_.size());
-      const auto res = eskf_.correct(radar_buf_.data(), radar_buf_.size(), s);
-      if (res.n_rejected > res.n_accepted || res.n_skipped > 0) {
+      // New API: one measurement per radar return through the generic correct().
+      rio::MeasurementContext ctx{&s};
+      size_t n_acc = 0, n_rej = 0, n_skp = 0;
+      const size_t n_total = radar_buf_.size();
+      for (const auto & d : radar_buf_) {
+        rio::RadarDopplerMeasurement m(radar_params_, d.u_R, d.vr);
+        const rio::MeasurementUpdate u = eskf_.correct(m, ctx);
+        switch (u.status) {
+          case rio::MeasurementUpdate::Accepted:
+            ++n_acc;
+            break;
+          case rio::MeasurementUpdate::Rejected:
+            ++n_rej;
+            break;
+          default:
+            ++n_skp;
+            break;
+        }
+      }
+      // No accepted update this tick → snap posterior covariance to the prior.
+      if (n_acc == 0) {
+        eskf_.advancePriorToPosterior();
+      }
+      if (n_rej > n_acc || n_skp > 0) {
         RCLCPP_WARN(
-          get_logger(), "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu",
-          res.n_total, res.n_accepted, res.n_rejected, res.n_skipped);
+          get_logger(), "Radar correction: total=%zu accepted=%zu rejected=%zu skipped=%zu", n_total,
+          n_acc, n_rej, n_skp);
       }
       radar_buf_.clear();
     } else {
@@ -542,7 +579,8 @@ private:
       rio::RadarDoppler m;
       m.u_R = p_R / r;
       m.vr = *it_v;
-      m.sigma = params_rio_.sigma_vr;
+      // Note: RadarDoppler::sigma is ignored by RadarDopplerMeasurement;
+      // the per-return noise comes from radar_params_.sigma_vr at correct time.
 
       radar_buf_.push_back(m);
     }
@@ -564,6 +602,22 @@ private:
         gimbal_frame_.c_str(), body_frame_.c_str(), ex.what());
       gimbal_tf_valid_ = false;
     }
+  }
+
+  // ----------------------------------------------------------------
+  // Set the (gimbal) IMU->radar extrinsics on the nominal state via an
+  // error-state injection through the public updateStateEstimate(). Only the
+  // extrinsic slots (dp_IR at 15, dtheta_IR at 18) are non-zero, so no other
+  // state is touched. quatExpSmall is the exact quaternion exponential, so
+  // quatLog reproduces q_IR exactly regardless of the per-scan gimbal delta.
+  // ----------------------------------------------------------------
+  void injectExtrinsics_(const rio::Vec3 & p_IR, const rio::Quat & q_IR)
+  {
+    const auto & x = eskf_.getState();
+    rio::Vec21 dx = rio::Vec21::Zero();
+    dx.segment<3>(15) = p_IR - x.p_IR;
+    dx.segment<3>(18) = quatLog(x.q_IR.conjugate() * q_IR.normalized());
+    eskf_.updateStateEstimate(dx);
   }
 
   // ---------------- PX4 velocity aiding ----------------
@@ -683,6 +737,7 @@ private:
   // rio-lib filter
   rio::RioEskf eskf_;
   rio::Params params_rio_{};
+  rio::RadarDopplerMeasurement::Params radar_params_{};
 
   // ROS interfaces
   rclcpp::Subscription<px4_msgs::msg::SensorCombined>::SharedPtr imu_sub_;

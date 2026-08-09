@@ -22,6 +22,11 @@
   <build_depend>eigen3_cmake_module</build_depend>
   <exec_depend>eigen3_cmake_module</exec_depend>
 
+  <!-- Python debug dashboard (tools/rio_dashboard.py) -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

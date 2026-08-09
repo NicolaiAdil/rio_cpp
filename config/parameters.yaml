@@ -38,9 +38,9 @@
 
       # ROS2 PARAMETERS
       state_estimate_topic: '/rio/pose' # Publisher
-      # imu_topic: '/vectornav_driver_node/imu/data'
-      gyro_topic: '/fmu/out/sensor_gyro'
-      accel_topic: '/fmu/out/sensor_accel'
+      imu_topic: '/fmu/out/sensor_combined'
+      # gyro_topic: '/fmu/out/sensor_gyro'
+      # accel_topic: '/fmu/out/sensor_accel'
       # fix_topic: '/fix'
       # heading_topic: '/heading'
       radar_topic: '/sr75_node/points'
